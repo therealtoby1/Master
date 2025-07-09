@@ -2,4 +2,21 @@
 The topic of this Master thesis is the <u> Data based modeling of Integro-Differential Equations </u>. Exemplary Equations can be found in the context of cell populations and/or crystal population models.
 
 First such equations are solved numerically (using python). The solution is a population model n(m,t). In the next step it is attempted to recreate the system dynamics using a model-based approach.
-This can be realized using **neural networks**, **DMD** or other Data based methods. the "real" DGL is then simply used for verification.
+This can be realized using **neural networks**, **DMD** or other Methods such as **Gaussian Processes**. the "real" DGL is then simply used for verification. 
+
+Then it is attempted to design an Observer for the model, where sampled ouput data y is provided. Observers suitable for this task include **Unscented Kalman Filters** or **Moving Horizon Estimation**
+
+
+The 04/07/2025 marks the start of my Master Thesis. Therefore i will write weekly summaries:
+
+---
+*07/07-11/07*   
+- [Easier bioreactor model](https://github.com/therealtoby1/Master/blob/main/Cell_growth_easy_Model.ipynb) in the form of a simple ODE for the dynamics to test out Data based modeling approaches as well as observer designs. Following things have been implemented there:
+    - simple Neural Networks with linear hidden layers (no PINNs yet)
+    - DMD and Hankel DMD (Hankel because n=2-->low dimension)
+    - Gaussian Process (work in progress)
+
+    and for the Observer :
+    - Unscented Kalman Filter (using filterpy)
+
+---
