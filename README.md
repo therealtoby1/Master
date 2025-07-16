@@ -23,4 +23,15 @@ The 04/07/2025 marks the start of my Master Thesis. Therefore i will write weekl
 
   - Unscented Kalman Filter (using filterpy)
 
+For the start i try to get a basic understanding of the different methods and keep the input constant (autonomous system)
+
 ---
+
+*14/07-18/07*
+- Improving the [Easier bioreactor model](https://github.com/therealtoby1/Master/blob/main/Cell_growth_easy_Model.ipynb)
+    - Finishing the GP- for modeling the System with and without time as an additional input parameter
+    - Implementing a Neural ODE to better catch the actual dynamics of the system--> best fit so far even when trained on one dataset only
+    - Testing Unscented Kalman Filter by providing noise measurements
+- Possible improvements: 
+    - learning system behaviour with input (Dilution rate not only constant anymore)
+- 18/07: Meeting with P.Jerono
