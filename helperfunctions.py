@@ -83,3 +83,50 @@ def compute_hankel_DMD(X, Xp, cols):
     stack_snapshots_Xp = stack_snapshots(Xp, cols)
 
     return compute_DMD(stack_snapshots_X, stack_snapshots_Xp)
+
+
+
+################Filter#################################
+def extended_kalman_filter(system_fn,jacobian_f,jacobian_h,y_measurements, x0, P0, Q, R, dt, **kwargs):
+
+
+    '''
+        Parameters:
+            system_fn:      Model of the system that takes current state input x_k and yields x_(k+1)
+            jacobian_f:     Jacobian of the Model (in discrete time!!!)--> F=I+J*dt where J is the Jacobian of the conti-time system
+            jacobian_h:     Jacobian of the ouptut function
+            y_measurements: (Noisy) Measurements of the output at discrete times t
+            x0:              Estimate of the original state
+            P0:              Estimate of initial error Covariance
+            Q:               Covariance of Process Noise
+            R:               Covariance of Measurement-Noise
+            dt:              Time between measurement samples
+            **kwargs         All arguments that also need to be passed to the system_fn (like K_m u_max)
+
+        Output:
+            x_est: estimate of the state'''
+    
+    n = len(y_measurements)
+    x_est = np.zeros((n, 2))
+    x = x0.copy()
+    x_est[0]=x
+    P = P0.copy()
+
+    for k in range(n):
+        # === Prediction step ===
+        x_pred = system_fn(x, dt,**kwargs)
+        F = jacobian_f(x, dt,**kwargs)
+        P_pred = F @ P @ F.T + Q        
+
+        # === Update step ===
+        H = jacobian_h(x_pred)
+        dy = y_measurements[k] - H @ x_pred
+        S = H @ P_pred @ H.T + R
+        K = P_pred @ H.T @ np.linalg.inv(S)
+        x = x_pred + K @ dy
+        P = (np.eye(2) - K @ H) @ P_pred
+
+        x_est[k] = x
+
+    return x_est
+
