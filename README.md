@@ -5,7 +5,9 @@ The topic of this Master thesis is the `<u>` Data based modeling of Integro-Diff
 First such equations are solved numerically (using python). The solution is a population model n(m,t). In the next step it is attempted to recreate the system dynamics using a model-based approach.
 This can be realized using **neural networks**, **DMD** or other Methods such as **Gaussian Processes**. the "real" DGL is then simply used for verification.
 
-Then it is attempted to design an Observer for the model, where sampled ouput data y is provided. Observers suitable for this task include **Unscented Kalman Filters** or **Moving Horizon Estimation**
+Then it is attempted to design an Observer for the model, where sampled output data y is provided. Observers suitable for this task include **Unscented /Extended Kalman Filters** or **Moving Horizon Estimation**
+
+Since Training the models may take some time, i will provide the saved models too. i name them according to their layer setup, e.g.  if there is a "2x64x64x2" in the filename this would indicate that to load this model you would need an input vector of dim2, and it gets passed through 2 hidden layers of size 64 and output a vector (or tensor) of size 2 again.
 
 The 04/07/2025 marks the start of my Master Thesis. Therefore i will write weekly summaries:
 
@@ -28,10 +30,24 @@ For the start i try to get a basic understanding of the different methods and ke
 ---
 
 *14/07-18/07*
+
 - Improving the [Easier bioreactor model](https://github.com/therealtoby1/Master/blob/main/Cell_growth_easy_Model.ipynb)
-    - Finishing the GP- for modeling the System with and without time as an additional input parameter
-    - Implementing a Neural ODE to better catch the actual dynamics of the system--> best fit so far even when trained on one dataset only
-    - Testing Unscented Kalman Filter by providing noise measurements
-- Possible improvements: 
-    - learning system behaviour with input (Dilution rate not only constant anymore)
+  - Finishing the GP- for modeling the System with and without time as an additional input parameter
+  - Implementing a Neural ODE to better catch the actual dynamics of the system--> best fit so far even when trained on one dataset only
+  - Testing Unscented Kalman Filter by providing noise measurements
+- Possible improvements:
+  - learning system behaviour with input (Dilution rate not only constant anymore)
 - 18/07: Meeting with P.Jerono
+
+---
+
+*21/07-25/07*
+Still working on the "easy" system model. A big part of this week was retraining the models because of errors i made previously.
+
+1. The datasets i gathered for training were all on the same trajectory-->not much information outside of this one trajectory could be obtained
+2. NODE optimization does take time since we are solving an ode for each iteration. Before i didnt let it run long enough, but now , running it for about 1.5h lead to a pretty good function
+
+- Implementation of the Extended Kalman Filter for the original system and the Neural networks (GP is work in Progress) using autograd for the NN.
+- Reading into the literature on Moving Horizon estimation as a third type of observer
+
+---

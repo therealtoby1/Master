@@ -1,4 +1,6 @@
 import numpy as np
+import torch
+import torch.optim as optim
 
 def compute_DMD(X,Xprime):
     """
@@ -86,7 +88,7 @@ def compute_hankel_DMD(X, Xp, cols):
 
 
 
-################Filter#################################
+################Filter and observer#################################
 def extended_kalman_filter(system_fn,jacobian_f,jacobian_h,y_measurements, x0, P0, Q, R, dt, **kwargs):
 
 
@@ -130,3 +132,86 @@ def extended_kalman_filter(system_fn,jacobian_f,jacobian_h,y_measurements, x0, P
 
     return x_est
 
+
+
+def mhe_estimate(model, y_meas, u_seq=None, window_size=5,
+                 x_init_guess=None, num_iter=10, lr=1e-2,
+                 Q_diag=None, R_diag=None, P_diag=None,**kwargs):
+    
+    """ a function to apply the moving horizon estimation to our measurements. 
+    Parameters:
+        model:          function that makes x_k-->x_k+1 for the system
+        y_meas:         measurements
+        u_seq:          input series
+        window_size:    nr of measurements used for the moving horizon estimation
+        x_init_guess:   initial guess of states (needs to be same size as window size)
+        num_iter:       iterations for optimization in each window step
+        Q_diag          Process Noise
+        R_diag          Measurement Noise
+        P_diag          Error Covariance Matrix
+
+    Returns: Estimate of the states up to the last measurement time -window size
+    
+    
+    """
+
+    H = len(y_meas)
+    #shifts= how often the sliding window has to iterate to match all the measurements
+    nshifts = H - window_size + 1
+
+    # Convert diagonal weights to tensors
+    Q_inv = torch.tensor(1.0 / np.array(Q_diag), dtype=torch.float32) if Q_diag is not None else 1.0
+    R_inv = torch.tensor(1.0 / np.array(R_diag), dtype=torch.float32) if R_diag is not None else 1.0
+    P_inv = torch.tensor(1.0 / np.array(P_diag), dtype=torch.float32) if P_diag is not None else 1.0
+
+    x_est = torch.tensor(x_init_guess, dtype=torch.float32, requires_grad=True)
+    estimated_states = []
+    prev_estimate = x_est.detach().clone()
+
+    for shift in range(nshifts):
+        optimizer = optim.Adam([x_est], lr=lr)
+
+        for _ in range(num_iter):
+            optimizer.zero_grad()
+            loss = 0.0
+
+
+            # arrival cost (initial value cost)
+            if shift > 0:
+                arrival_diff = x_est[0] - prev_estimate[1]
+                loss += torch.sum(P_inv * arrival_diff.pow(2))
+            
+
+            # measurement cost
+            for t in range(window_size):
+                y_t = y_meas[shift + t]
+                y_pred = x_est[t,0]             #for specific functions this would need modification
+                diff = y_t - y_pred
+                loss += torch.sum(R_inv * diff.pow(2))
+            # model cost
+            for t in range(window_size - 1):
+                x_t = x_est[t]
+                x_pred = model(x_t,**kwargs) if u_seq is None else model(x_t, u_seq[shift + t],**kwargs)
+
+                if isinstance(x_pred, np.ndarray):  #if model returns np. it should be turned into a tensor
+                    x_pred = torch.tensor(x_pred, dtype=torch.float32)
+    
+
+                diff = x_est[t + 1] - x_pred
+                loss += torch.sum(Q_inv * diff.pow(2))
+
+            loss.backward()
+            optimizer.step()
+
+        estimated_states.append(x_est[0].detach().clone())
+        prev_estimate = x_est.detach().clone()
+
+        with torch.no_grad():
+            x_est[:-1] = x_est[1:].clone()
+            x_pred = model(x_est[-2], **kwargs)
+            if isinstance(x_pred, np.ndarray):
+                x_pred = torch.tensor(x_pred, dtype=torch.float32)
+            x_est[-1] = x_pred
+
+        # print(shift)
+    return torch.stack(estimated_states).numpy()
