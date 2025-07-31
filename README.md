@@ -51,3 +51,16 @@ Still working on the "easy" system model. A big part of this week was retraining
 - Reading into the literature on Moving Horizon estimation as a third type of observer
 
 ---
+
+*28/07-32/07*
+- Implementing the EKF for all models completed
+- Moving Horizon optimization also coded
+- Using inputs for the dilution rate in the "easy" system model and watching which models were best suited for the approximation
+  - NN performed best (fast training and best fit)
+  - attempt at making a "sliding window training" for the models ... was not as good as i initially expected it to be 
+  - Node was also good, but training was very time expensive
+  - GP couldnt take all the training datasets--> complexity O(n^3) for inverting -->only trained on subset, but still very good fit
+  - Patrick Kidger pHD thesis--> continous normalizing flows lesen
+  - Neural Operator (apparently better suited for pdes than Neural ODEs)
+
+
