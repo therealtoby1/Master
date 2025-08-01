@@ -130,7 +130,7 @@ def extended_kalman_filter(system_fn,jacobian_f,jacobian_h,y_measurements, x0, P
 
         x_est[k] = x
 
-    return x_est
+    return np.vstack([x0, x_est])
 
 
 
