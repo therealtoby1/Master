@@ -52,7 +52,7 @@ Still working on the "easy" system model. A big part of this week was retraining
 
 ---
 
-*28/07-32/07*
+*28/07-31/07*
 - Implementing the EKF for all models completed
 - Moving Horizon optimization also coded
 - Using inputs for the dilution rate in the "easy" system model and watching which models were best suited for the approximation
@@ -63,4 +63,19 @@ Still working on the "easy" system model. A big part of this week was retraining
   - Patrick Kidger pHD thesis--> continous normalizing flows lesen
   - Neural Operator (apparently better suited for pdes than Neural ODEs)
 
+---
+
+**02/08-08/08*
+Thinking about creating a new branch called "to_torch" since this looks like its going to be a very coding heavy week and i will have to make quite a lot of changes like moving system strucures to torch to ensure optimization works. 
+1. Move original System and GP to torch (Saturday)
+2. adapt changes to EKF (and UKF) (Sunday+Monday/Tuesday) and apply continous EKF to the systems...
+3. fix MHE (Tuesday/Wednesday/Thursday) and test for more samples...
+4. compare Jacobians of the system between NN and original system(when using EKF) (Thursday/Friday)
+5. Testing the Sensitivity of Q (Q/R) (Saturday)
+
+
+
+Issues of the previous week:
+-  MHE : currently the computational graph of x0 is lost when transferring the structure to numpy --> backprop doesnt "see" x0 after it predicts the next step in the moving horizon
+--> might have to rewrite the original system to torch  as well as the GP, because otherwise it would be too much effort... 
 
