@@ -91,6 +91,7 @@ class Neuralnetwork (nn.Module):
 The model is trained by approximating dx/dt=f(x,u), integrating it and then comparing it to the 'real' states. 
 When using multiple training sets, training can get quite time intensive, so it is easier to create a 'batch' of all the data, where 
 one can simply stack all the elements in a List containing [B,S,U]_1,....[B,S,U]_N, where N is the number of batches"""
+import numbers
 class ODEFunc(nn.Module):
     def __init__(self, dim_x, dim_u, t_grid, u_seq):
         super().__init__()
@@ -104,12 +105,19 @@ class ODEFunc(nn.Module):
         self.u_seq = u_seq          # [N, T, 1]
 
     def get_u_at_t(self, t):
-        """
-        Returns u(t) for ALL trajectories at once (zero-order hold).
-        t: scalar
-        """
-        idx = torch.argmin(torch.abs(self.t_grid - t))
-        return self.u_seq[:, idx, :]    # [N, 1]
+        if isinstance(self.u_seq, numbers.Number):
+            return torch.tensor([[self.u_seq]], dtype=torch.float32)  # shape [1, 1] e.g. for handing over scalars
+        # If single trajectory, shape might be [T, 1]
+        if isinstance(self.u_seq, torch.Tensor):
+            if self.u_seq.dim() == 2:
+                # Assume shape [T, 1]as e.g. a nparray
+                idx = torch.argmin(torch.abs(self.t_grid - t))
+                return self.u_seq[idx].unsqueeze(0)  # shape [1, 1]
+            else:
+                # Batch case: [N, T, 1]
+                idx = torch.argmin(torch.abs(self.t_grid - t))
+                return self.u_seq[:, idx, :]  # [N, 1]
+        raise ValueError("u_seq must be a scalar or a torch.Tensor")
 
     def forward(self, t, x):
         """
@@ -126,6 +134,8 @@ class ODEFunc(nn.Module):
 
         # --- Get the input u(t)
         u_t = self.get_u_at_t(t)   # [N, 1]
+        if not torch.is_tensor(u_t):
+            u_t = torch.tensor(u_t, dtype=torch.float32)
         xu = torch.cat([x, u_t], dim=-1)  # [N, dim_x + dim_u]
         dx = self.net(xu)  # [N, dim_x]
 
