@@ -30,43 +30,26 @@ class TorchBiosystemModelWithInputs(nn.Module):
         dsdt =  D * (self.s_e - s) - rho * b
         return torch.stack([dbdt, dsdt], dim=-1)
 
-    def forward(self, y0, t_eval, D_seq):
+    def step(self, y, dt, D):
         """
-        y0: (...,2) initial state
-        t_eval: (T,) time grid
-        D_seq: (T-1,) or (T,) sequence of D values at each step
-               (we’ll use D_seq[i] for the step from t[i] to t[i+1])
-        returns: (T,...,2) full trajectory
+        Advance the system by one time step.
+        
+        y: (...,2) current state
+        dt: scalar step size
+        D: scalar or broadcastable with y batch dims
+
+        returns: (...,2) state at t+dt
         """
-        T = t_eval.shape[0]
-        ys = [y0]
-        y = y0
-
-        # ensure D_seq length matches
-        assert D_seq.numel() in (T, T-1), "D_seq must be length T or T-1"
-
-        for i in range(T-1):
-            ti, ti1 = t_eval[i], t_eval[i+1]
-            dt = ti1 - ti
-            # pick piecewise-constant D for this interval
-            D_i = D_seq[i] if D_seq.numel()==T-1 else D_seq[i]
-            # expand D_i to match y’s batch shape if needed:
-            # e.g. if y has batch dims, ensure D_i has same leading dims
-            # here we assume D_i is scalar or broadcastable
-
-            if self.method == "euler":
-                k1 = self._rhs(y, D_i)
-                y = y + dt * k1
-            else:  # RK4
-                k1 = self._rhs(y,         D_i)
-                k2 = self._rhs(y + dt/2*k1, D_i)
-                k3 = self._rhs(y + dt/2*k2, D_i)
-                k4 = self._rhs(y + dt  *k3, D_i)
-                y = y + dt/6*(k1 + 2*k2 + 2*k3 + k4)
-
-            ys.append(y)
-
-        return torch.stack(ys, dim=0)
+        if self.method == "euler":
+            k1 = self._rhs(y, D)
+            y_next = y + dt * k1
+        else:  # RK4
+            k1 = self._rhs(y, D)
+            k2 = self._rhs(y + dt/2 * k1, D)
+            k3 = self._rhs(y + dt/2 * k2, D)
+            k4 = self._rhs(y + dt   * k3, D)
+            y_next = y + dt/6 * (k1 + 2*k2 + 2*k3 + k4)
+        return y_next
 
 
 
