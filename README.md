@@ -69,9 +69,10 @@ Still working on the "easy" system model. A big part of this week was retraining
 Thinking about creating a new branch called "to_torch" since this looks like its going to be a very coding heavy week and i will have to make quite a lot of changes like moving system strucures to torch to ensure optimization works. 
 1. Move original System and GP to torch (Saturday)-->done
 2. adapt changes to EKF (and UKF) (Sunday+Monday/Tuesday) and apply continous EKF to the systems... -->done and also improved ODEfunc to take scalar inputs 
-3. fix MHE (Tuesday/Wednesday/Thursday) and test for more samples...
-4. compare Jacobians of the system between NN and original system(when using EKF) (Thursday/Friday)
-5. Testing the Sensitivity of Q (Q/R) (Saturday)
+3. fix MHE (Tuesday/Wednesday/Thursday) and test for more samples...    -->done but tuning on saturday
+4. compare Jacobians of the system between NN and original system(when using EKF) (Thursday/Friday)-->done
+5. Testing the Sensitivity of Q (Q/R) (Saturday)-->do sometime when i got time... before that tho: look at DMD again (Meurer lecture notes...)
+
 
 
 

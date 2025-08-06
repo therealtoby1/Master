@@ -75,7 +75,7 @@ class ODEFunc(nn.Module):
                 # Assume shape [T, 1]as e.g. a nparray
                 idx = torch.argmin(torch.abs(self.t_grid - t))
                 return self.u_seq[idx].unsqueeze(0)  # shape [1, 1]
-            else:
+            else:  
                 # Batch case: [N, T, 1]
                 idx = torch.argmin(torch.abs(self.t_grid - t))
                 return self.u_seq[:, idx, :]  # [N, 1]

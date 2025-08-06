@@ -239,7 +239,10 @@ def extended_kalman_filter_discrete(system_fn, jacobian_f, jacobian_h,
 
         Output:
             x_est: estimate of the state
+            Jacobian at each timestep
         '''
+    F_store=[]
+    
     n = len(y_measurements)
     x_est = np.zeros((n, 2))
     x = x0.copy()
@@ -266,14 +269,15 @@ def extended_kalman_filter_discrete(system_fn, jacobian_f, jacobian_h,
         P = (np.eye(2) - K @ H) @ P_pred
 
         x_est[k] = x
+        F_store.append(F)
 
-    return np.vstack([x0, x_est])
+    return np.vstack([x0, x_est]),F_store
 
 
 
 #==============continous time jacobians for kalman bucy (extended)
 
-def jacobian_biosystem_continous(x, dt, D_value, K_m, s_e, mu_max,**kwargs):
+def compute_jacobian_biosystem_continous(x, dt, D_value, K_m, s_e, mu_max,**kwargs):
     b, s = x
     rho = mu_max * s / (K_m + s)
     drho_ds = mu_max * K_m / (K_m + s)**2
@@ -289,7 +293,7 @@ def jacobian_biosystem_continous(x, dt, D_value, K_m, s_e, mu_max,**kwargs):
     return F
 
 def compute_jacobian_NODE_continuous(x_input, dt=None, D_value=0,**kwargs):
-    """Compute discrete-time Jacobian for NODE (F = I + J*dt). returs as a np.ndarray"""
+    """Compute continous Jacobian for NODE  returs as a np.ndarray"""
     model = kwargs['model']  # ODEFunc instance
     model.u_seq=D_value
     x_input = torch.tensor(x_input, dtype=torch.float32)
@@ -312,6 +316,7 @@ def compute_jacobian_NODE_continuous(x_input, dt=None, D_value=0,**kwargs):
 ##====Jacobians for the extended Kalman filter
 
 def compute_jacobian_analytical(x, dt, D_value, K_m, s_e, mu_max,**kwargs):
+    """discrete jacobian of the original biosystem """
     b, s = x
     rho = mu_max * s / (K_m + s)
     drho_ds = mu_max * K_m / (K_m + s)**2
@@ -327,7 +332,8 @@ def compute_jacobian_analytical(x, dt, D_value, K_m, s_e, mu_max,**kwargs):
     return F
 
 
-def compute_jacobian_autograd(x_input, dt=None, D_value=None, **kwargs):
+def compute_jacobian_NN_autograd(x_input, dt=None, D_value=None, **kwargs):
+    """jacobian for the NN for the discrete time EKF"""
     model = kwargs['model']   # classicNN_model will be passed here
 
     # --- ensure state has grad
@@ -381,11 +387,43 @@ def compute_jacobian_NODE(x_input, dt=None,D_value=0, **kwargs):
     J = np.stack(jacobian, axis=0)               # shape (dim_x, dim_x)
     return np.eye(len(x_input)) + J * dt
 
+def compute_jacobian_GP_autograd(x_input, dt=None, D_value=None, **kwargs):
+    """
+    Computes Jacobian of GP output w.r.t. biomass and substrate using autograd.
+    """
+    model = kwargs['model']
+    likelihood = kwargs['likelihood']
 
+    # Create input tensor with gradients enabled for first two inputs
+    x_in = torch.tensor([[float(x_input[0]), float(x_input[1]), float(D_value)]],
+                        dtype=torch.float32, requires_grad=True)
+
+    # Forward pass without torch.no_grad()
+    model.eval()
+    likelihood.eval()
+    with gpytorch.settings.fast_pred_var():
+        pred = likelihood(model(x_in))
+        y = pred.mean.squeeze(0)  # shape [n_outputs]
+
+    # Compute Jacobian of outputs w.r.t. first two inputs
+    n_outputs = y.shape[0]
+    jacobian = torch.zeros((n_outputs, 2), dtype=torch.float32)
+
+    for i in range(n_outputs):
+        # Compute gradient of y[i] w.r.t. inputs
+        grad = torch.autograd.grad(
+            outputs=y[i],
+            inputs=x_in,
+            retain_graph=True,
+            create_graph=False
+        )[0]  # shape [1, 3]
+        jacobian[i, :] = grad[0, :2]  # only biomass & substrate
+
+    return jacobian.detach().numpy()
 
 def finite_difference_jacobian_gp_bs(x_input,dt=None,D_value=None , eps=1e-2,**kwargs):
     """
-    Computes Jacobian of GP output w.r.t. biomass and substrate only.
+    Computes Jacobian of GP output w.r.t. biomass and substrate for the discrete time EKF 
 
     Args:
         model: GP model
@@ -421,82 +459,87 @@ def compute_jacobian_h(x):
 
 def mhe_estimate(model, y_meas, u_seq=None, window_size=5,
                  x_init_guess=None, num_iter=10, lr=1e-2,
-                 Q_diag=None, R_diag=None, P_diag=None,**kwargs):
-    
-    """ a function to apply the moving horizon estimation to our measurements. 
-    Parameters:
-        model:          function that makes x_k-->x_k+1 for the system
-        y_meas:         measurements
-        u_seq:          input series
-        window_size:    nr of measurements used for the moving horizon estimation
-        x_init_guess:   initial guess of states (needs to be same size as window size)
-        num_iter:       iterations for optimization in each window step
-        Q_diag          Process Noise
-        R_diag          Measurement Noise
-        P_diag          Error Covariance Matrix
-
-    Returns: Estimate of the states up to the last measurement time -window size
-    
-    
+                 Q_diag=None, R_diag=None, P_diag=None, **kwargs):
     """
+    Moving Horizon Estimation with explicit process noise variables w_k.
 
+    Args:
+        model:      function mapping x_k and optional input to x_{k+1}
+        y_meas:     array of measurements (lengt h H)
+        u_seq:      array of control inputs (length H-1) or None
+        window_size:number of steps in each estimation window
+        x_init_guess:initial guess for state vector (1D array, length state_dim)
+        num_iter:   number of optimizer steps per window shift
+        lr:         learning rate for Adam
+        Q_diag:     process noise covariance diagonal (array or scalar)
+        R_diag:     measurement noise covariance diagonal
+        P_diag:     prior covariance diagonal for arrival cost
+    Returns:
+        np.ndarray of estimated states at each shift (shape [H-window_size+1, state_dim])
+    """
     H = len(y_meas)
-    #shifts= how often the sliding window has to iterate to match all the measurements
     nshifts = H - window_size + 1
 
-    # Convert diagonal weights to tensors
+    # convert covariances to torch weights
     Q_inv = torch.tensor(1.0 / np.array(Q_diag), dtype=torch.float32) if Q_diag is not None else 1.0
     R_inv = torch.tensor(1.0 / np.array(R_diag), dtype=torch.float32) if R_diag is not None else 1.0
     P_inv = torch.tensor(1.0 / np.array(P_diag), dtype=torch.float32) if P_diag is not None else 1.0
 
-    x_est = torch.tensor(x_init_guess, dtype=torch.float32, requires_grad=True)
+    # flatten initial guess to 1D
+    prev_state = torch.tensor(x_init_guess, dtype=torch.float32).view(-1)
+    state_dim = prev_state.numel()
+
     estimated_states = []
-    prev_estimate = x_est.detach().clone()
+    for shift in range(nshifts):      #-1 because the measurement at the last index is needed too if we want the full Window
+        # decision variables: initial state x0 and noise sequence w
+        x0 = prev_state.detach().clone().requires_grad_(True)
+        w = torch.zeros((window_size-1, state_dim), dtype=torch.float32, requires_grad=True)
 
-    for shift in range(nshifts):
-        optimizer = optim.Adam([x_est], lr=lr)
-
+        optimizer = optim.Adam([x0, w], lr=lr)
         for _ in range(num_iter):
             optimizer.zero_grad()
-            loss = 0.0
+
+            # arrival cost on x0
+            if nshifts==0:
+                loss=0.0
+            else: 
+                loss = torch.sum(P_inv * (x0 - prev_state).pow(2)+((x0.squeeze())[0]-y_meas[shift]).pow(2))
+                
+
+            # propagate through window
+            x_k = x0
+            for t in range(window_size-1):   
+                # model prediction expects 1D numpy; we convert and back
 
 
-            # arrival cost (initial value cost)
-            if shift > 0:
-                arrival_diff = x_est[0] - prev_estimate[1]
-                loss += torch.sum(P_inv * arrival_diff.pow(2))
-            
+                x_pred = model(x_k, **({} if u_seq is None else {"D_value": u_seq[shift + t], **kwargs}))
+                x_pred = x_pred.squeeze() 
+                
 
-            # measurement cost
-            for t in range(window_size):
-                y_t = y_meas[shift + t]
-                y_pred = x_est[t,0]             #for specific functions this would need modification
-                diff = y_t - y_pred
-                loss += torch.sum(R_inv * diff.pow(2))
-            # model cost
-            for t in range(window_size - 1):
-                x_t = x_est[t]
-                x_pred = model(x_t,**kwargs) if u_seq is None else model(x_t, u_seq[shift + t],**kwargs)
+                # apply explicit process noise
+                w_k = w[t]      
+                x_k = x_pred + w_k
+                
+                y_k = torch.tensor(y_meas[shift + t + 1 ], dtype=torch.float32)
 
-                if isinstance(x_pred, np.ndarray):  #if model returns np. it should be turned into a tensor
-                    x_pred = torch.tensor(x_pred, dtype=torch.float32)
-    
-
-                diff = x_est[t + 1] - x_pred
-                loss += torch.sum(Q_inv * diff.pow(2))
+                # measurement penalty on first state component (measurement cost)
+                loss = loss + torch.sum((y_k - x_k[0]).pow(2) * R_inv)
+                # noise penalty on the state estimation
+                loss = loss + torch.sum(Q_inv * w_k.pow(2))
+             
 
             loss.backward()
             optimizer.step()
 
-        estimated_states.append(x_est[0].detach().clone())
-        prev_estimate = x_est.detach().clone()
+        # record estimated x0
+        estimated_states.append(x0.detach().numpy())
 
-        with torch.no_grad():
-            x_est[:-1] = x_est[1:].clone()
-            x_pred = model(x_est[-2], **kwargs)
-            if isinstance(x_pred, np.ndarray):
-                x_pred = torch.tensor(x_pred, dtype=torch.float32)
-            x_est[-1] = x_pred
+        # advance prev_state by one step: f(x0) + w[0]
+        pred_torch = model(x0, **({} if u_seq is None else {"D_value": u_seq[shift], **kwargs}))
+        
+        prev_state = (pred_torch + w[0].detach()).detach()      #important to detach! otherwise it carries it over to the next shift (next window after the 
+        #old one has already been optimized) and the old computational graph gets carried over
+        #when i then try to call backward(), it leads to the error message of "Trying to backward through the graph a second time"
 
-        # print(shift)
-    return torch.stack(estimated_states).numpy()
+    return np.vstack(estimated_states)
+#for the original biosystem i have to use 
