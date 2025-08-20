@@ -13,10 +13,18 @@ import numpy as np
 
 #ADAM OPTIMIZER ON FULL DATASET (SMALL DATASETS); large datasets should use SGD as my laptop crashed twice
 
-def train_the_model_full_dataset_Adam(model, X_train, Y_train, num_epochs=300):
+def train_the_model_full_dataset_Adam(model, X_train, Y_train, num_epochs=300,loss_function=None,**kwargs):
+
+    " A function to help train the model usinng the ADAM optimizer on the whole dataset (used for the batch optimization)"
+    "kwargs may be added and will be used in a Loss function that the user can also define"
+
+
     model.train()
     optimizer = torch.optim.Adam(model.parameters(), lr=1e-2)
-    criterion = nn.MSELoss()
+    if loss_function is not None:
+        criterion = loss_function
+    else : 
+        criterion = nn.MSELoss()
 
     scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
         optimizer,
@@ -34,7 +42,7 @@ def train_the_model_full_dataset_Adam(model, X_train, Y_train, num_epochs=300):
     while epoch < num_epochs:
         optimizer.zero_grad()
         output = model(X_train)
-        loss = criterion(output, Y_train)
+        loss = criterion(output, Y_train, **kwargs)
         loss.backward()
         optimizer.step()
 
@@ -47,7 +55,7 @@ def train_the_model_full_dataset_Adam(model, X_train, Y_train, num_epochs=300):
 
         if epoch % 100 == 0 or epoch == 0:
             lr = optimizer.param_groups[0]['lr']
-            print(f"Iter {epoch:05d} | Loss: {loss.item():.6f} | Best: {best_loss:.6f} | LR: {lr:.2e}")
+            print(f"Iter {epoch:05d} | Loss: {loss.item():.8f} | Best: {best_loss:.8f} | LR: {lr:.2e}")
         epoch += 1
 
         # # optional break condition
@@ -59,6 +67,33 @@ def train_the_model_full_dataset_Adam(model, X_train, Y_train, num_epochs=300):
         model.load_state_dict(best_state)
 
     return model, best_loss
+
+def PINN_loss_fun_batch(output, Y_train, *, n_max, s_max, mass_grid, lamb=1e-3, w_nonneg=1e2):
+    #denormalize for the physics constraint!
+
+    mse=nn.MSELoss()
+    n_pred_denorm=output[:, :-1] * n_max 
+    s_pred_denorm=output[:, -1] * s_max 
+
+    n_Y_train_denorm = Y_train[:, :-1] * n_max
+    s_Y_train_denorm = Y_train[:, -1] * s_max
+
+    entire_initial_mass=(n_Y_train_denorm * mass_grid).sum(dim=1)*(mass_grid[1]-mass_grid[0]) + s_Y_train_denorm
+    # biomass + substrate for each batch element
+    K      = entire_initial_mass
+    K_pred = (n_pred_denorm  * mass_grid).sum(dim=1) * (mass_grid[1]-mass_grid[0]) + s_pred_denorm
+
+    # physics loss + data loss
+    loss_data   = mse(output, Y_train)
+    loss_phys   = mse(K, K_pred)
+
+    # substrate nonnegativity penalty
+    S_pred = s_pred_denorm
+    loss_nonneg = w_nonneg * torch.mean(torch.relu(-S_pred) ** 2)
+
+    # total loss
+    loss = loss_data +lamb*loss_phys
+    return loss
 
 #run a simulation
 def rollout(model, n0, s0, steps, n_max, S_max=5.0, return_numpy=True):
