@@ -10,13 +10,14 @@ import numpy as np
 
 
 
-
+########################################NEURAL NETWORK TRAINING FUNCTIONS########################################
 #ADAM OPTIMIZER ON FULL DATASET (SMALL DATASETS); large datasets should use SGD as my laptop crashed twice
 
 def train_the_model_full_dataset_Adam(model, X_train, Y_train, num_epochs=300,loss_function=None,**kwargs):
 
     " A function to help train the model usinng the ADAM optimizer on the whole dataset (used for the batch optimization)"
     "kwargs may be added and will be used in a Loss function that the user can also define"
+
 
 
     model.train()
@@ -69,6 +70,8 @@ def train_the_model_full_dataset_Adam(model, X_train, Y_train, num_epochs=300,lo
     return model, best_loss
 
 def PINN_loss_fun_batch(output, Y_train, *, n_max, s_max, mass_grid, lamb=1e-3, w_nonneg=1e2):
+    """A custom loss function that can include the preservation of mass for the integro differential equation. 
+    It can be directly used in the training function defined above"""
     #denormalize for the physics constraint!
 
     mse=nn.MSELoss()
@@ -149,6 +152,85 @@ def rollout(model, n0, s0, steps, n_max, S_max=5.0, return_numpy=True):
         return N.numpy(), S.numpy()
     return N, S
 
+
+#######################################################DYNAMIC MODE DECOMPOSITION########################################################
+
+def EDMD_feature_space(X, degree=3):
+    """
+    FUNCTION FOR EDMD to create the feature space for the DMD algorithm
+    ------------------------------------------------------------------
+    Build feature matrix with:
+      - distribution n (linear)
+      - substrate polynomials up to 'degree'
+      - cross terms n * S^k
+      - RBF features in substrate S
+
+    Args:
+      X: (N, M+1) snapshots, rows = [n_vec, S]
+      degree: polynomial degree for substrate (default=2)
+    Returns:
+      Phi: (N, feature_dim)
+    """
+    N, d = X.shape
+    M = d - 1
+    n = X[:, :M]          # (N, M)
+    S = X[:, -1:]         # (N, 1)
+    eps=1e-8
+    features = [n]  # always keep full distribution
+
+    # substrate polynomials: S, S^2, ..., S^degree
+    for k in range(1, degree+1):
+        Sk = S**k
+        features.append(Sk)
+        features.append((Sk+n))
+        features.append(n* Sk)  # cross terms with n
+    
+
+ 
+    Phi = torch.cat(features, dim=1)
+    return Phi
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+#######################################################Plotting Functions########################################################
 
 def plot_spaghetti(m, t, N, title="", step=2, colorscale='Viridis'):
     """

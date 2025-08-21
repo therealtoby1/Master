@@ -53,11 +53,12 @@ Still working on the "easy" system model. A big part of this week was retraining
 ---
 
 *28/07-31/07*
+
 - Implementing the EKF for all models completed
 - Moving Horizon optimization also coded
 - Using inputs for the dilution rate in the "easy" system model and watching which models were best suited for the approximation
   - NN performed best (fast training and best fit)
-  - attempt at making a "sliding window training" for the models ... was not as good as i initially expected it to be 
+  - attempt at making a "sliding window training" for the models ... was not as good as i initially expected it to be
   - Node was also good, but training was very time expensive
   - GP couldnt take all the training datasets--> complexity O(n^3) for inverting -->only trained on subset, but still very good fit
   - Patrick Kidger pHD thesis--> continous normalizing flows lesen
@@ -66,30 +67,24 @@ Still working on the "easy" system model. A big part of this week was retraining
 ---
 
 *02/08-08/08*
-Thinking about creating a new branch called "to_torch" since this looks like its going to be a very coding heavy week and i will have to make quite a lot of changes like moving system strucures to torch to ensure optimization works. 
+Thinking about creating a new branch called "to_torch" since this looks like its going to be a very coding heavy week and i will have to make quite a lot of changes like moving system strucures to torch to ensure optimization works.
+
 1. Move original System and GP to torch (Saturday)-->done
-2. adapt changes to EKF (and UKF) (Sunday+Monday/Tuesday) and apply continous EKF to the systems... -->done and also improved ODEfunc to take scalar inputs 
+2. adapt changes to EKF (and UKF) (Sunday+Monday/Tuesday) and apply continous EKF to the systems... -->done and also improved ODEfunc to take scalar inputs
 3. fix MHE (Tuesday/Wednesday/Thursday) and test for more samples...    -->done but tuning on saturday
 4. compare Jacobians of the system between NN and original system(when using EKF) (Thursday/Friday)-->done
 5. Testing the Sensitivity of Q (Q/R) (Saturday)-->do sometime when i got time... before that tho: look at DMD again (Meurer lecture notes...)
+Issues of the previous week:
 
+- MHE : currently the computational graph of x0 is lost when transferring the structure to numpy --> backprop doesnt "see" x0 after it predicts the next step in the moving horizon
+  --> might have to rewrite the original system to torch  as well as the GP, because otherwise it would be too much effort...
 
 *10/08-15/08*
 implementing the PDE equations with the correct constraints.
 
-
 *16/08-23/08*
+
 - Training a Neural network for the input-free system (batch) on data from the PDE.
-- attempting DMD for the Datasets
+- attempting DMD for the Datasets --also EDMD and reading into literature
 - Maybe finding a way to implement GP even though data size is large
-
-
-
-
-
-
-
-Issues of the previous week:
--  MHE : currently the computational graph of x0 is lost when transferring the structure to numpy --> backprop doesnt "see" x0 after it predicts the next step in the moving horizon
---> might have to rewrite the original system to torch  as well as the GP, because otherwise it would be too much effort... 
-
+- creating more validation sets--> find an error metric and visualization process
