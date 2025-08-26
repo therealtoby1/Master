@@ -124,10 +124,6 @@ def rollout(model, n0, s0, steps, n_max, S_max=5.0, return_numpy=True):
     N[:, 0] = n
     S[0] = s
 
-    if not torch.is_tensor(n_max):
-        log_n_max = torch.log1p(torch.tensor(n_max, dtype=torch.float32))
-    else: 
-        log_n_max = torch.log1p(n_max)
 
     with torch.no_grad():
         for t in range(steps):
