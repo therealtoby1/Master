@@ -1,19 +1,27 @@
 # ============================================================
 # Unscented Kalman Filter with Substrate as Last State
+# The Filter works with already normalized inputs and measurments
 # ============================================================
+import warnings
 import torch
+import matplotlib.pyplot as plt
+import numpy as np
+import gpytorch
+
 class UKF:
-    def __init__(self, state_dim, meas_dim, f_model, h_model, 
+    def __init__(self, state_dim, meas_dim, f_model, h_model, n_max, s_max,
                  Q=None, R=None, P0=None, alpha=0.1, beta=2.0, kappa=0.0):
         self.n = state_dim
         self.m = meas_dim
         self.f_model = f_model
         self.h_model = h_model
+        self.n_max = n_max
+        self.s_max = s_max
 
         self.Q = Q if Q is not None else torch.eye(self.n) * 1e-3
         self.R = R if R is not None else torch.eye(self.m) * 1e-2
         self.P = P0 if P0 is not None else torch.eye(self.n)*1e-2
-        self.x = torch.zeros(self.n)
+        self.x = torch.zeros(self.n)      #initial guess- pls assign value
 
         self.alpha = alpha
         self.beta = beta
@@ -26,6 +34,12 @@ class UKF:
         self.Wc[0] = self.Wm[0] + (1 - alpha**2 + beta)
 
     # --------------------------------------------------------
+    def set_initial_state(self,x_phys):
+        x_norm=x_phys.clone()
+        x_norm[:-1] = x_norm[:-1] / self.n_max
+        x_norm[-1]  = x_norm[-1]  / self.s_max
+        self.x = x_norm
+
     def sigma_points(self, x, P):
         # ensure symmetry
         P = 0.5 * (P + P.T)
@@ -99,13 +113,75 @@ class UKF:
         # store initial guess before any correction
         X_estimates[0] = self.x
 
+        #check if normalization happened earlier
+        if (X_estimates > 10).any():
+            warnings.warn(
+                "Suspiciously large values in initial state. "
+                "Did you forget to normalize? "
+                "Use set_initial_state() for automatic normalization."
+            )
+
         for t in range(T):
             u = U_seq[t] if U_seq is not None else None
             y_meas = Y_seq[t]
             x_new, _ = self.step(u, y_meas)
             X_estimates[t+1] = x_new
 
-        return X_estimates
+        X_phys = X_estimates.clone()
+        X_phys[:, :-1] *= self.n_max
+        X_phys[:, -1]  *= self.s_max
+        return X_phys
+    def plot_results(self, X_estimates, biomass_measurement,
+                    S_reference=None, m_torch=None, delta_m_torch=None,
+                    title_prefix="UKF"):
+        """
+        Plot biomass (measured vs estimated) and substrate (estimated vs reference)
+        in one figure with 2 subplots.
+        """
+        # ensure numpy arrays
+        if torch.is_tensor(biomass_measurement):
+            bm_meas_np = biomass_measurement.detach().cpu().numpy()
+        else:
+            bm_meas_np = np.array(biomass_measurement)
+
+        # extract estimated distribution + substrate
+        n_est_traj = X_estimates[:, :-1]
+        S_est_traj = X_estimates[:, -1]
+
+        # compute biomass from estimated distribution
+        if m_torch is None or delta_m_torch is None:
+            raise ValueError("m_torch and delta_m_torch are required to compute biomass.")
+        biomass_est = (n_est_traj * m_torch).sum(dim=1) * delta_m_torch
+        biomass_est_np = biomass_est.detach().numpy()
+        S_est_np = S_est_traj.detach().numpy()
+
+        # substrate reference if available
+        S_ref_np = None
+        if S_reference is not None:
+            if torch.is_tensor(S_reference):
+                S_ref_np = S_reference.detach().numpy()
+            else:
+                S_ref_np = np.array(S_reference)
+
+        # --- Plot ---
+        fig, (ax1, ax2) = plt.subplots(2, 1, figsize=(8, 6), sharex=True)
+
+        # Biomass subplot
+        ax1.plot(bm_meas_np, '-', label='Measured biomass')
+        ax1.plot(biomass_est_np, 'o', markersize=2, label=f'{title_prefix} biomass estimate')
+        ax1.set_ylabel("Biomass")
+        ax1.grid(True); ax1.legend()
+
+        # Substrate subplot
+        if S_ref_np is not None:
+            ax2.plot(S_ref_np, '-', label="Reference substrate")
+        ax2.plot(S_est_np, 'o', markersize=2, label=f'{title_prefix} substrate estimate')
+        
+        ax2.set_xlabel("Timestep"); ax2.set_ylabel("Substrate")
+        ax2.grid(True); ax2.legend()
+
+        plt.tight_layout()
+        plt.show()
 
 
 def rollout(model, n_norm0, s_norm0, steps):
@@ -136,7 +212,7 @@ def rollout(model, n_norm0, s_norm0, steps):
 
 #f_model for one forward step using the rollout function that has already been defined: 
 
-def f_model(x, model):
+def f_model_NN(x, model):
     """
     One-step dynamics wrapper for UKF using rollout().
     
@@ -158,3 +234,27 @@ def f_model(x, model):
     n_next = N[:, 1]
     s_next = S[1]
     return torch.cat([n_next, s_next.view(1)], dim=0)
+
+def f_model_GP(x, model, likelihood):
+    """
+    One-step dynamics wrapper for UKF using a trained GP.
+    
+    Args:
+        x: state vector (M+1,) normalized
+        model: GPyTorch model
+        likelihood: GPyTorch likelihood
+    
+    Returns:
+        mean_next: (M+1,) torch tensor (normalized)
+    """
+    model.eval()
+    likelihood.eval()
+    with torch.no_grad(), gpytorch.settings.fast_pred_var():
+        # GP expects batch dimension
+        x_in = x.unsqueeze(0)   # (1, D)
+        
+        # predictive distribution
+        pred = likelihood(model(x_in))    # MultitaskMultivariateNormal
+        mean = pred.mean.squeeze(0)       # (M+1,)
+        
+    return mean
