@@ -74,17 +74,35 @@ Thinking about creating a new branch called "to_torch" since this looks like its
 3. fix MHE (Tuesday/Wednesday/Thursday) and test for more samples...    -->done but tuning on saturday
 4. compare Jacobians of the system between NN and original system(when using EKF) (Thursday/Friday)-->done
 5. Testing the Sensitivity of Q (Q/R) (Saturday)-->do sometime when i got time... before that tho: look at DMD again (Meurer lecture notes...)
-Issues of the previous week:
+   Issues of the previous week:
 
 - MHE : currently the computational graph of x0 is lost when transferring the structure to numpy --> backprop doesnt "see" x0 after it predicts the next step in the moving horizon
   --> might have to rewrite the original system to torch  as well as the GP, because otherwise it would be too much effort...
 
+---
+
 *10/08-15/08*
 implementing the PDE equations with the correct constraints.
 
+---
+
 *16/08-23/08*
+
+This weeks work will take place in the folder [Training_data_integro_diff_batch](https://github.com/therealtoby1/Master/tree/main/Training_data_integro_diff_batch)
+The Notebook files will contain the models and the training steps. The results will be stored in this very folder. The file [All_Models.py](https://github.com/therealtoby1/Master/blob/main/Training_data_integro_diff_batch/All_Models.py) stores the classes for the Neural Networks, GPs etc., so that i can later use them in the [Cell_growth_integro_diff_batch.ipynb](https://github.com/therealtoby1/Master/blob/main/Cell_growth_integro_diff_Batch.ipynb)
+
 
 - Training a Neural network for the input-free system (batch) on data from the PDE.
 - attempting DMD for the Datasets --also EDMD and reading into literature
 - Maybe finding a way to implement GP even though data size is large
 - creating more validation sets--> find an error metric and visualization process
+
+---
+
+*25/08 - 29/08*
+
+This week i will make an attempt to use the first observer on the batch models of the integro differential equation. 
+- Implementing the UKF for all models that have a relatively good fit
+- Implementing the EKF for all models that have a relatively good fit
+- Moving Horizon estimation for all those models
+

@@ -4,7 +4,7 @@ import torch.nn as nn
 from torch.utils.data import TensorDataset, DataLoader
 import plotly.graph_objects as go
 import numpy as np
-
+import torch.optim as optim
 
 
 
@@ -12,6 +12,99 @@ import numpy as np
 
 ########################################NEURAL NETWORK TRAINING FUNCTIONS########################################
 #ADAM OPTIMIZER ON FULL DATASET (SMALL DATASETS); large datasets should use SGD as my laptop crashed twice
+def train_with_dataloader_Adam(model, 
+                               X_train, Y_train,
+                               X_val, Y_val,
+                               num_epochs=300, 
+                               batch_size=64,
+                               patience=20,
+                               lr=1e-2,
+                               loss_function=None,
+                               **kwargs):
+    """
+    Train model with Adam optimizer, DataLoader mini-batches, 
+    and early stopping based on validation loss.
+
+    Args:
+        model: nn.Module
+        X_train, Y_train: training tensors
+        X_val, Y_val: validation tensors
+        num_epochs: maximum epochs
+        batch_size: mini-batch size
+        patience: early stopping patience
+        lr: learning rate
+        loss_function: optional custom loss (default MSE)
+        kwargs: extra args passed to loss function
+
+    Returns:
+        model (with best weights), best_val_loss
+    """
+    # Dataloaders
+    train_loader = DataLoader(TensorDataset(X_train, Y_train),
+                              batch_size=batch_size, shuffle=True)
+    val_loader   = DataLoader(TensorDataset(X_val, Y_val),
+                              batch_size=batch_size, shuffle=False)
+
+    # Loss + optimizer
+    criterion = loss_function if loss_function is not None else nn.MSELoss()
+    optimizer = optim.Adam(model.parameters(), lr=lr)
+    scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
+        optimizer, mode='min', factor=0.5, patience=10,
+        threshold=1e-6, min_lr=1e-6
+    )
+
+    best_val_loss = float('inf')
+    best_state = None
+    epochs_no_improve = 0
+
+    for epoch in range(num_epochs):
+        # ---- Training ----
+        model.train()
+        train_loss = 0.0
+        for Xb, Yb in train_loader:
+            optimizer.zero_grad()
+            out = model(Xb)
+            loss = criterion(out, Yb, **kwargs)
+            loss.backward()
+            optimizer.step()
+            train_loss += loss.item() * Xb.size(0)
+        train_loss /= len(train_loader.dataset)
+
+        # ---- Validation ----
+        model.eval()
+        val_loss = 0.0
+        with torch.no_grad():
+            for Xb, Yb in val_loader:
+                out = model(Xb)
+                val_loss += criterion(out, Yb, **kwargs).item() * Xb.size(0)
+        val_loss /= len(val_loader.dataset)
+
+        scheduler.step(val_loss)
+
+        # ---- Early stopping check ----
+        if val_loss < best_val_loss - 1e-6:  # min_delta
+            best_val_loss = val_loss
+            best_state = {k: v.clone() for k, v in model.state_dict().items()}
+            epochs_no_improve = 0
+        else:
+            epochs_no_improve += 1
+
+        # ---- Logging ----
+        if epoch % 50 == 0 or epoch == num_epochs-1:
+            lr_curr = optimizer.param_groups[0]['lr']
+            print(f"Epoch {epoch:04d} | Train {train_loss:.6f} | Val {val_loss:.6f} | "
+                  f"Best {best_val_loss:.6f} | LR {lr_curr:.2e}")
+
+        if epochs_no_improve >= patience:
+            print(f"Early stopping triggered at epoch {epoch+1}")
+            break
+
+    # ---- Restore best weights ----
+    if best_state is not None:
+        model.load_state_dict(best_state)
+
+    return model, best_val_loss
+
 
 def train_the_model_full_dataset_Adam(model, X_train, Y_train, num_epochs=300,loss_function=None,**kwargs):
 
@@ -148,6 +241,98 @@ def rollout(model, n0, s0, steps, n_max, S_max=5.0, return_numpy=True):
         return N.numpy(), S.numpy()
     return N, S
 
+def NN_feature_space(X, degree=3):
+    """
+    FUNCTION FOR EDMD to create the feature space for the DMD algorithm
+    ------------------------------------------------------------------
+    Build feature matrix with:
+      - distribution n (linear)
+      - substrate polynomials up to 'degree'
+      - cross terms n * S^k
+      - RBF features in substrate S
+
+    Args:
+      X: (N, M+1) snapshots, rows = [n_vec, S]
+      degree: polynomial degree for substrate (default=2)
+    Returns:
+      Phi: (N, feature_dim)
+    """
+    N, d = X.shape
+    M = d - 1
+    n = X[:, :M]          # (N, M)
+    S = X[:, -1:]         # (N, 1)
+    eps=1e-8
+    features = [n]  # always keep full distribution
+
+    # substrate polynomials: S, S^2, ..., S^degree
+    for k in range(1, degree+1):
+        Sk = S**k
+        features.append(Sk)
+        features.append(n**k)
+        features.append((Sk+n))
+        features.append(n* Sk)  # cross terms with n
+    
+    #we end up with M+ degree*(201)
+ 
+    Phi = torch.cat(features, dim=1)
+    return Phi
+
+def rollout_feature_model(model, n0, s0, steps, degree, n_max, S_max=5.0, return_numpy=False):
+    """
+    Rollout a NN trained in feature space with normalization.
+
+    Args:
+        model: trained NN (input = EDMD features of normalized state)
+        n0:    (M,) torch tensor, initial distribution (unnormalized physical)
+        s0:    scalar or tensor, initial substrate (unnormalized physical)
+        steps: number of steps to simulate
+        degree: degree for EDMD_feature_space
+        n_max: normalization constant for distribution
+        S_max: normalization constant for substrate
+        return_numpy: if True, return numpy arrays, else torch tensors
+
+    Returns:
+        N: (M, steps+1) trajectory of distribution (unnormalized)
+        S: (steps+1,) trajectory of substrate (unnormalized)
+    """
+    model.eval()
+
+    if not torch.is_tensor(n0):
+        n0 = torch.tensor(n0, dtype=torch.float32)
+    n = n0.float().view(-1)
+    s = torch.as_tensor(s0, dtype=torch.float32).view(())
+
+    M = n.shape[0]
+    N = torch.empty((M, steps + 1), dtype=torch.float32)
+    S = torch.empty((steps + 1,), dtype=torch.float32)
+    N[:, 0] = n
+    S[0] = s
+
+    with torch.no_grad():
+        for t in range(steps):
+            # --- normalize current state ---
+            n_norm = N[:, t] / n_max
+            s_norm = S[t] / S_max
+            x_norm = torch.cat([n_norm, s_norm.unsqueeze(0)], dim=0)  # (M+1,)
+
+            # --- lift to feature space ---
+            phi_x = NN_feature_space(x_norm.unsqueeze(0), degree=degree)  # (1, feature_dim)
+
+            # --- predict next state in normalized space ---
+            y_norm = model(phi_x).squeeze(0)   # (feature_dim,)
+
+            # --- invert normalization (assuming first M+1 entries are physical state) ---
+            n_next = y_norm[:M] * n_max
+            s_next = y_norm[M] * S_max
+
+            # --- store ---
+            N[:, t+1] = n_next
+            S[t+1] = s_next
+
+    if return_numpy:
+        return N.numpy(), S.numpy()
+    return N, S
+
 
 #######################################################DYNAMIC MODE DECOMPOSITION########################################################
 
@@ -178,10 +363,11 @@ def EDMD_feature_space(X, degree=3):
     for k in range(1, degree+1):
         Sk = S**k
         features.append(Sk)
+        # features.append(n**k)
         features.append((Sk+n))
         features.append(n* Sk)  # cross terms with n
     
-
+    #we end up with M+ degree*(201)
  
     Phi = torch.cat(features, dim=1)
     return Phi

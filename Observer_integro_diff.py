@@ -131,6 +131,7 @@ class UKF:
         X_phys[:, :-1] *= self.n_max
         X_phys[:, -1]  *= self.s_max
         return X_phys
+    #------------------------------------------------------------
     def plot_results(self, X_estimates, biomass_measurement,
                     S_reference=None, m_torch=None, delta_m_torch=None,
                     title_prefix="UKF"):
@@ -183,6 +184,88 @@ class UKF:
         plt.tight_layout()
         plt.show()
 
+
+    #----------------------------------------------------evaluating error function
+    def evaluate_errors(self, X_estimates, biomass_true, S_true, 
+                    m_torch, delta_m_torch,
+                    rel_tol=0.05, abs_tol=1e-6, window=10):
+        """
+        Evaluate UKF errors for biomass + substrate against reference trajectories.
+        Ignores the first state (initial guess) and the last state (no measurement).
+        """
+        # slice states to match measurements
+        X = X_estimates[1:-1].clone()
+
+        # slice reference trajectories (skip initial value, align lengths)
+        biomass_true = torch.as_tensor(biomass_true, dtype=torch.float32).view(-1)[1:]
+        S_true = torch.as_tensor(S_true, dtype=torch.float32).view(-1)[1:]
+
+
+        # estimated outputs
+        biomass_est = (X[:, :-1] * m_torch).sum(dim=1) * delta_m_torch
+        substrate_est = X[:, -1]
+
+        # compute metrics
+        biomass_metrics = error_metrics(biomass_true, biomass_est,
+                                        rel_tol=rel_tol, abs_tol=abs_tol, window=window)
+        substrate_metrics = error_metrics(S_true, substrate_est,
+                                        rel_tol=rel_tol, abs_tol=abs_tol, window=window)
+
+        return {
+            "biomass": biomass_metrics,
+            "substrate": substrate_metrics
+        }
+    
+
+
+
+#-------------------------------------------------------END OF UKF--------------------------------------------------------
+def error_metrics(y_true, y_est, rel_tol=0.05, abs_tol=1e-6, window=10):
+    """
+    Compute error metrics between true and estimated trajectories.
+    
+    Args:
+        y_true: (T,) ground truth trajectory
+        y_est:  (T,) estimated trajectory
+        rel_tol: relative tolerance (fraction of mean(|y_true|))
+        abs_tol: absolute tolerance floor
+        window: consecutive steps required for settling
+
+    Returns:
+        dict with RMSE, MAE, relative norms, time_in_tol, settling_time
+    """
+    y_true = torch.as_tensor(y_true, dtype=torch.float32).view(-1)
+    y_est  = torch.as_tensor(y_est, dtype=torch.float32).view(-1)
+    e = y_est - y_true
+    T = len(y_true)
+
+    # dynamic tolerance
+    tol_val = max(abs_tol, rel_tol * y_true.abs().mean().item())
+
+    rmse = torch.sqrt((e**2).mean()).item()
+    mae  = e.abs().mean().item()
+    max_err = e.abs().max().item()
+    rel_l2 = torch.norm(e, p=2).item() / (torch.norm(y_true, p=2).item() + 1e-12)
+
+    # percentage of time within tol
+    time_in_tol = (e.abs() < tol_val).float().mean().item()
+
+    # settling time (first index where error stays < tol for 'window' steps)
+    settling_time = T
+    for t in range(T - window):
+        if (e[t:t+window].abs() < tol_val).all():
+            settling_time = t
+            break
+
+    return {
+        "RMSE": rmse,
+        "MAE": mae,
+        "MaxError": max_err,
+        "Rel_L2": rel_l2,
+        "time_in_tol (%)": time_in_tol,
+        "settling_time(Timesteps)": settling_time,
+        "tolerance_used": tol_val,
+    }
 
 def rollout(model, n_norm0, s_norm0, steps):
     """
@@ -258,3 +341,125 @@ def f_model_GP(x, model, likelihood):
         mean = pred.mean.squeeze(0)       # (M+1,)
         
     return mean
+
+
+####f_model_DMD######
+def EDMD_feature_space(X, degree=3):
+    """
+    FUNCTION FOR EDMD to create the feature space for the DMD algorithm
+    ------------------------------------------------------------------
+    Build feature matrix with:
+      - distribution n (linear)
+      - substrate polynomials up to 'degree'
+      - cross terms n * S^k
+      - RBF features in substrate S
+
+    Args:
+      X: (N, M+1) snapshots, rows = [n_vec, S]
+      degree: polynomial degree for substrate (default=2)
+    Returns:
+      Phi: (N, feature_dim)
+    """
+    N, d = X.shape
+    M = d - 1
+    n = X[:, :M]          # (N, M)
+    S = X[:, -1:]         # (N, 1)
+    eps=1e-8
+    features = [n]  # always keep full distribution
+
+    # substrate polynomials: S, S^2, ..., S^degree
+    for k in range(1, degree+1):
+        Sk = S**k
+        features.append(Sk)
+        features.append((Sk+n))
+        features.append(n* Sk)  # cross terms with n
+ 
+    Phi = torch.cat(features, dim=1)
+    return Phi
+
+def f_model_EDMD(x,
+                U_r,            #matrix for reduced order approx
+                K_tilde,        #forward matrix for phi_k+1 = K_tilde @ phi_k
+                degree):        #degree of feature space polynomial
+    dim=x.size(0)
+    phi0 = EDMD_feature_space(x.unsqueeze(0),degree=degree).squeeze(0)  # (2M+1,)
+    z0 = U_r.T @ phi0
+    z_pred = K_tilde @ z0
+    Phi_pred = (U_r @ z_pred.T).T  
+    x_est=Phi_pred[:dim]
+
+    return x_est
+
+def NN_feature_space(X, degree=3):
+    """
+    FUNCTION FOR EDMD to create the feature space for the DMD algorithm
+    ------------------------------------------------------------------
+    Build feature matrix with:
+      - distribution n (linear)
+      - substrate polynomials up to 'degree'
+      - cross terms n * S^k
+      - RBF features in substrate S
+
+    Args:
+      X: (N, M+1) snapshots, rows = [n_vec, S]
+      degree: polynomial degree for substrate (default=2)
+    Returns:
+      Phi: (N, feature_dim)
+    """
+    N, d = X.shape
+    M = d - 1
+    n = X[:, :M]          # (N, M)
+    S = X[:, -1:]         # (N, 1)
+    eps=1e-8
+    features = [n]  # always keep full distribution
+
+    # substrate polynomials: S, S^2, ..., S^degree
+    for k in range(1, degree+1):
+        Sk = S**k
+        features.append(Sk)
+        features.append(n**k)
+        features.append((Sk+n))
+        features.append(n* Sk)  # cross terms with n
+    
+    #we end up with M+ degree*(201)
+ 
+    Phi = torch.cat(features, dim=1)
+    return Phi
+
+def f_model_NN_feature_space(model, x, degree, steps=1):
+    """
+    One-step or multi-step rollout for a NN trained in feature space.
+    Assumes x = [n (M,), s] is ALREADY normalized (no scaling inside).
+    
+    Args:
+        model: trained NN (input = EDMD features of normalized state)
+        x:     (M+1,) torch tensor, normalized state [n, s]
+        degree: polynomial degree for EDMD_feature_space
+        steps: number of rollout steps to apply
+
+    Returns:
+        x_next: (M+1,) torch tensor, normalized state after 'steps'
+    """
+    model.eval()
+
+    if not torch.is_tensor(x):
+        x = torch.tensor(x, dtype=torch.float32)
+    x = x.float().view(-1)
+
+    M = x.shape[0] - 1  # number of bins (last entry is substrate)
+
+    with torch.no_grad():
+        x_curr = x
+        for _ in range(steps):
+            # lift to feature space
+            phi_x = NN_feature_space(x_curr.unsqueeze(0), degree=degree)  # (1, feature_dim)
+
+            # predict next feature vector
+            y_norm = model(phi_x).squeeze(0)  # (feature_dim,)
+
+            # extract next normalized state (assume first M+1 are raw state)
+            n_next = y_norm[:M]
+            s_next = y_norm[M]
+            x_curr = torch.cat([n_next, s_next.view(1)], dim=0)
+
+    return x_curr
