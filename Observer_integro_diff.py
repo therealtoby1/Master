@@ -10,13 +10,14 @@ import gpytorch
 
 class UKF:
     def __init__(self, state_dim, meas_dim, f_model, h_model, n_max, s_max,
-                 Q=None, R=None, P0=None, alpha=0.1, beta=2.0, kappa=0.0):
+                 Q=None, R=None, P0=None, alpha=0.1, beta=2.0, kappa=0.0,m_min=0):
         self.n = state_dim
         self.m = meas_dim
         self.f_model = f_model
         self.h_model = h_model
         self.n_max = n_max
         self.s_max = s_max
+        self.m_min = m_min
 
         self.Q = Q if Q is not None else torch.eye(self.n) * 1e-3
         self.R = R if R is not None else torch.eye(self.m) * 1e-2
@@ -91,6 +92,9 @@ class UKF:
             Pxy += self.Wc[i] * dx[:, None] @ dy[None, :]
 
         K = Pxy @ torch.linalg.inv(Pyy)
+        # if self.m_min ==0:
+        #     K[0,:]= 0.0
+
 
         self.x = x_pred + (K @ (y_meas - y_pred)).squeeze()
         self.P = P_pred - K @ Pyy @ K.T
@@ -126,7 +130,10 @@ class UKF:
             y_meas = Y_seq[t]
             x_new, _ = self.step(u, y_meas)
             X_estimates[t+1] = x_new
+            print(X_estimates[t+1,50])
 
+
+        
         X_phys = X_estimates.clone()
         X_phys[:, :-1] *= self.n_max
         X_phys[:, -1]  *= self.s_max
@@ -417,7 +424,7 @@ def NN_feature_space(X, degree=3):
     for k in range(1, degree+1):
         Sk = S**k
         features.append(Sk)
-        features.append(n**k)
+        # features.append(n**k)
         features.append((Sk+n))
         features.append(n* Sk)  # cross terms with n
     

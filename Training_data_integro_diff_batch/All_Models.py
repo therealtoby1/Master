@@ -359,7 +359,7 @@ class PopulationSystemNormalizedSplit(nn.Module):
     def transport_rhs(self, n_hat, S_hat):
         # alpha(S) in physical units
         S_phys = self.S_max * S_hat
-        alpha = self.ks_max * S_phys / (self.K_s + S_phys + 1e-12)
+        alpha = self.ks_max * S_phys / (self.K_s + S_phys)
 
         # growth velocity * mass
         rg = alpha * self.m
@@ -452,7 +452,81 @@ class PopulationSystemNormalizedSplit(nn.Module):
         return self.step(x, D_func=(lambda t, i, D=u: D))
 
 
+from torchdiffeq import odeint
 
+class PopulationPDE(nn.Module):
+    def __init__(self, m, P, delta_m, se_phys, m_max, m_min, 
+                 n_max, S_max, ks_max=0.8, K_s=2.0):
+        super().__init__()
+        self.register_buffer("m", m)
+        self.register_buffer("P", P)
+        self.delta_m = float(delta_m)
+        self.se_phys = float(se_phys)
+        self.m_max   = float(m_max)
+        self.m_min   = float(m_min)
+        self.n_max   = float(n_max)
+        self.S_max   = float(S_max)
+        self.kappa   = n_max / S_max
+        self.se_hat  = se_phys / S_max
+        self.ks_max  = ks_max
+        self.K_s     = K_s
 
+    def forward(self, t, x):
+        """RHS for normalized state x = [n_hat, S_hat]"""
+        n_hat = x[:-1]
+        S_hat = x[-1]
 
+        # alpha(S)
+        S_phys = self.S_max * S_hat
+        alpha  = self.ks_max * S_phys / (self.K_s + S_phys + 1e-12)
+
+        # transport
+        rg = alpha * self.m
+        rg_n = rg * n_hat
+        flux_out = rg_n[-1]
+        rg_n = rg_n.clone()
+        rg_n[-1] = 0.0
+
+        d_rg_n_dm = torch.zeros_like(n_hat)
+        d_rg_n_dm[1:] = (rg_n[1:] - rg_n[:-1]) / self.delta_m
+        d_rg_n_dm[0]  = rg_n[0] / self.delta_m
+        T = -d_rg_n_dm
+        T[-1] += flux_out / self.delta_m
+
+        # division & dilution
+        G = (1.0/(self.m_max - self.m + 1e-12)
+             - 1.0/(self.m_max - self.m_min + 1e-12)).clamp(min=0.0) * rg
+        division_loss = G * n_hat
+        division_gain = 2.0 * self.delta_m * (G * n_hat) @ self.P
+        dn_hat_dt = T - division_loss + division_gain
+
+        # substrate
+        uptake = torch.sum(rg * n_hat) * self.delta_m
+        dS_hat_dt = - self.kappa * uptake
+
+        return torch.cat([dn_hat_dt, dS_hat_dt.view(1)])
+
+class PDEWrapper(nn.Module):
+    def __init__(self, pde_model, delta_t):
+        super().__init__()
+        self.pde_model = pde_model
+        self.delta_t = delta_t
+
+    def forward(self, x, u=None):
+        """
+        x: (M+1,) normalized state [n_hat, S_hat]
+        u: optional dilution rate D(t) (scalar)
+        returns: x_next after delta_t
+        """
+        # current and next time
+        t = torch.tensor([0.0, self.delta_t], dtype=x.dtype)
+
+        # define RHS with optional dilution
+        def rhs(t_, x_):
+            return self.pde_model.forward(t_, x_) - (u if u is not None else 0.0) * torch.cat([x_[:-1], x_[-1:].view(1)])
+
+        # integrate one step
+        sol = odeint(rhs, x, t, method="dopri5")
+        x_next = sol[-1]
+        return x_next
 

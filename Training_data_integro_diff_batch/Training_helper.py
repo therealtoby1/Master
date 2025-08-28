@@ -268,7 +268,7 @@ def NN_feature_space(X, degree=3):
     for k in range(1, degree+1):
         Sk = S**k
         features.append(Sk)
-        features.append(n**k)
+        # features.append(n**k)
         features.append((Sk+n))
         features.append(n* Sk)  # cross terms with n
     
