@@ -2,6 +2,7 @@
 import torch
 import torch.nn as nn
 import gpytorch
+import math
 
 """simple neural network, nothing special"""
 class Neuralnetwork(nn.Module):
@@ -263,3 +264,195 @@ class SparseLMCMultitaskGP(gpytorch.models.ApproximateGP):
         mean_x = self.mean_module(x)
         covar_x = self.covar_module(x)
         return gpytorch.distributions.MultivariateNormal(mean_x, covar_x)
+
+###########################PDE- EQUATION################################################################
+def build_P_torch(m, q, Bqq, delta_m):
+    """
+    Build probability matrix P for size partitioning.
+    m: (M,) torch tensor
+    """
+    M = m.shape[0]
+    P = torch.zeros((M, M), dtype=torch.float32)
+
+    for k in range(M):
+        mk = m[k]
+        if mk <= 0:
+            continue
+
+        x = m[:k] / mk  # daughters
+        nonzero_vals = (1.0 / Bqq) * (1.0 / mk) * (x ** (q - 1)) * ((1 - x) ** (q - 1))
+        P[k, :k] = nonzero_vals
+
+        # Normalize
+        Z = torch.sum(P[k, :k]) * delta_m
+        if Z > 0:
+            P[k, :k] /= Z
+
+        # First moment condition
+        mom = torch.sum(m[:k] * P[k, :k]) * delta_m
+        if mom > 0:
+            P[k, :k] *= (0.5 * mk / mom)
+
+    return P
+
+
+
+def r_g_phys(m, S_hat, S_max, ks_max=0.8, K_s=2.0):
+    S = S_max * S_hat
+    rho = (ks_max * S) / (K_s + S + 1e-12)
+    return rho * m
+
+def Gamma_phys(m, S_hat, m_max, m_min_div, S_max, ks_max=0.8, K_s=2.0):
+    eps = 1e-12
+    gamma_m = 1.0/(m_max - m + eps) - 1.0/(m_max - m_min_div + eps)
+    # physical: no division below threshold -> clip to 0
+    gamma_m = torch.clamp(gamma_m, min=0.0)
+    return gamma_m * r_g_phys(m, S_hat, S_max, ks_max, K_s)
+
+class PopulationSystemNormalizedSplit(nn.Module):
+    """
+    Normalized state x = [n_hat (M,), S_hat].
+    Exact dynamics & boundaries; per micro-step we do:
+      (A) transport (explicit upwind, CFL)
+      (B) division+dilution (semi-implicit sink, explicit gain)  -> positivity-preserving
+      (C) substrate explicit.
+    """
+    def __init__(self, m, P, delta_m,
+                 se_phys, m_max, minimal_division_mass,
+                 n_max, S_max,
+                 ks_max=0.8, K_s=2.0,
+                 delta_t=0.01,
+                 cfl_limit=0.8, react_limit=0.5,
+                 integrator="rk4",              # used only for transport part
+                 dtype=torch.float32,
+                 project_nonneg=True,           # clamp tiny negatives after substep
+                 eps_clip=0.0):                 # set e.g. 0 or 1e-12
+        super().__init__()
+        self.register_buffer("m", m.to(dtype))
+        self.register_buffer("P", P.to(dtype))
+        self.delta_m = float(delta_m)
+
+        self.se_phys = float(se_phys)
+        self.m_max   = float(m_max)
+        self.m_min   = float(minimal_division_mass)
+        self.ks_max  = float(ks_max)
+        self.K_s     = float(K_s)
+
+        self.n_max   = float(n_max)
+        self.S_max   = float(S_max)
+        self.kappa   = self.n_max / self.S_max
+        self.se_hat  = self.se_phys / self.S_max
+
+        self.delta_t = float(delta_t)
+        self.cfl_limit   = float(cfl_limit)
+        self.react_limit = float(react_limit)
+        self.integrator  = integrator.lower()
+        self._dtype      = dtype
+        self.project_nonneg = project_nonneg
+        self.eps_clip       = float(eps_clip)
+
+        # faces for transport fluxes
+        m_faces = 0.5 * (self.m[1:] + self.m[:-1])
+        self.register_buffer("m_faces", m_faces)
+
+    # ---------- transport divergence ONLY: -∂_m( r_g * n_hat ) ----------
+    def transport_rhs(self, n_hat, S_hat):
+        # alpha(S) in physical units
+        S_phys = self.S_max * S_hat
+        alpha = self.ks_max * S_phys / (self.K_s + S_phys + 1e-12)
+
+        # growth velocity * mass
+        rg = alpha * self.m
+
+        # rg * n_hat = growth flux
+        rg_n = rg * n_hat
+        flux_out = rg_n[-1]         # store last-bin flux
+        rg_n = rg_n.clone()
+        rg_n[-1] = 0.0              # enforce zero at the right boundary
+
+        # derivative in m
+        d_rg_n_dm = torch.zeros_like(n_hat)
+        d_rg_n_dm[1:] = (rg_n[1:] - rg_n[:-1]) / self.delta_m
+        d_rg_n_dm[0]  = rg_n[0] / self.delta_m   # left boundary
+
+        # transport contribution
+        T = -d_rg_n_dm
+        T[-1] += flux_out / self.delta_m         # right boundary correction
+
+        return T, rg
+
+    # ---------- one micro-step (A,B,C) ----------
+    def _micro_step(self, x, h, t=0.0, D_t=0.0):
+        n_hat = x[:-1]
+        S_hat = x[-1]
+
+        # (A) transport explicit (with RK4/Euler on transport part only)
+        def tr_rhs(nv):
+            T, _ = self.transport_rhs(nv, S_hat)
+            return T
+
+        if self.integrator == "euler":
+            n_tmp = n_hat + h * tr_rhs(n_hat)
+        else:
+            k1 = tr_rhs(n_hat)
+            k2 = tr_rhs(n_hat + 0.5*h*k1)
+            k3 = tr_rhs(n_hat + 0.5*h*k2)
+            k4 = tr_rhs(n_hat + h*k3)
+            n_tmp = n_hat + (h/6.0) * (k1 + 2*k2 + 2*k3 + k4)
+
+        # (B) division + dilution: semi-implicit sink, explicit gain
+        G = Gamma_phys(self.m, S_hat, self.m_max, self.m_min, self.S_max, self.ks_max, self.K_s)
+        gain = 2.0 * self.delta_m * (G * n_tmp) @ self.P
+        denom = (1.0 + h * (G + D_t))                 # elementwise
+        n_next = (n_tmp + h * gain) / denom
+
+        # (C) substrate explicit using n_tmp (after transport)
+        v = r_g_phys(self.m, S_hat, self.S_max, self.ks_max, self.K_s)
+        uptake = torch.sum(v * n_tmp) * self.delta_m
+        S_next = S_hat + h * (- self.kappa * uptake + D_t * (self.se_hat - S_hat))
+
+        if self.project_nonneg:
+            n_next = torch.clamp(n_next, min=self.eps_clip)
+            S_next = torch.clamp(S_next, min=self.eps_clip)
+
+        return torch.cat([n_next, S_next.view(1)])
+
+    # ---------- number of micro-steps from transport & reaction scales ----------
+    def _num_substeps(self, x, D_t):
+        S_hat = float(x[-1])
+        S = self.S_max * S_hat
+        alpha = self.ks_max * S / (self.K_s + S + 1e-12)
+        v_max = abs(alpha) * float(self.m.max())
+        cfl_ratio = v_max * self.delta_t / (self.delta_m + 1e-12)
+        N_cfl = 1 if (v_max == 0.0 or cfl_ratio <= self.cfl_limit) else int(math.ceil(cfl_ratio/self.cfl_limit))
+
+        # reaction timescale: max(Gamma + D)
+        rgv  = r_g_phys(self.m, S_hat, self.S_max, self.ks_max, self.K_s)
+        G    = (1.0/(self.m_max - self.m + 1e-12) - 1.0/(self.m_max - self.m_min + 1e-12))
+        G    = torch.clamp(G, min=0.0) * rgv
+        rate = float(torch.max(G).item() + abs(D_t))
+        react_ratio = rate * self.delta_t
+        N_react = 1 if (rate == 0.0 or react_ratio <= self.react_limit) else int(math.ceil(react_ratio/self.react_limit))
+
+        return max(1, N_cfl, N_react)
+
+    # ---------- one UKF step with adaptive micro-steps & external D(t) ----------
+    def step(self, x, t=0.0, i=0.0, D_func=None):
+        D_t = float(D_func(t, i)) if D_func is not None else 0.0
+        N   = self._num_substeps(x, D_t)
+        h   = self.delta_t / N
+        xk  = x
+        for s in range(N):
+            xk = self._micro_step(xk, h, t + s*h, D_t)
+        return xk
+
+    def forward(self, x, u=None):  # u = D_t if you pass via U_seq
+        if u is None:
+            return self.step(x)
+        return self.step(x, D_func=(lambda t, i, D=u: D))
+
+
+
+
+
+
