@@ -130,7 +130,6 @@ class UKF:
             y_meas = Y_seq[t]
             x_new, _ = self.step(u, y_meas)
             X_estimates[t+1] = x_new
-            print(X_estimates[t+1,50])
 
 
         
@@ -138,64 +137,176 @@ class UKF:
         X_phys[:, :-1] *= self.n_max
         X_phys[:, -1]  *= self.s_max
         return X_phys
-    #------------------------------------------------------------
-    def plot_results(self, X_estimates, biomass_measurement,
-                    S_reference=None, m_torch=None, delta_m_torch=None,
-                    title_prefix="UKF"):
+    #------------------------------------------------------------plotting----------------------
+    def plot_results(self, X_estimates, biomass_measurement, 
+                 S_reference=None, m_torch=None, delta_m_torch=None,
+                 title_prefix="UKF",
+                 rel_tol=0.01, abs_tol=0.05,
+                 y_max_mass=5, y_max_substrate=5,
+                 window=10,
+                 plot_tolerance=True,
+                 show_x0=True):
         """
         Plot biomass (measured vs estimated) and substrate (estimated vs reference)
         in one figure with 2 subplots.
+
+        - Uses error_metrics to draw tolerance bands (if plot_tolerance=True).
+        - Aligns estimates as *post-update*: y_k (t=k) -> x_{k+1} (t=k+1).
+        That is, if X_estimates has length T+1 (x0 + x1..xT) and measurements have length T,
+        we plot estimates at t=1..T, and show x0 as a marker at t=0.
         """
-        # ensure numpy arrays
-        if torch.is_tensor(biomass_measurement):
-            bm_meas_np = biomass_measurement.detach().cpu().numpy()
+
+        import numpy as np
+        import matplotlib.pyplot as plt
+        import torch
+
+        # --- to tensors (CPU for plotting) ---
+        bm_meas = biomass_measurement.detach().cpu() if torch.is_tensor(biomass_measurement) \
+                else torch.as_tensor(biomass_measurement, dtype=torch.float32)
+        if not torch.is_tensor(X_estimates):
+            X_estimates = torch.as_tensor(X_estimates, dtype=torch.float32)
+
+        S_ref = None
+        if S_reference is not None:
+            S_ref = S_reference.detach().cpu() if torch.is_tensor(S_reference) \
+                    else torch.as_tensor(S_reference, dtype=torch.float32)
+
+        # --- lengths ---
+        Tm = bm_meas.shape[0]          # number of measurements
+        Te = X_estimates.shape[0]      # number of state entries (often Tm+1)
+
+        # --- alignment & time indices ---
+        # Case A (typical): Te >= Tm + 1 -> we have x0 and posteriors x1..xTm
+        if Te >= Tm + 1:
+            L = Tm
+            X = X_estimates[1:1+L].clone()     # x1..xL
+            t_meas = np.arange(L)              # 0..L-1 (y_0..y_{L-1})
+            t_est  = np.arange(1, L+1)         # 1..L   (x_1..x_L)
+            x0_state = X_estimates[0].clone() if show_x0 else None
+            # trim references to L if present
+            if S_ref is not None:
+                S_ref = S_ref[:L]
+        # Case B: Te == Tm -> no separate x0 row; use same-index alignment safely
+        elif Te == Tm:
+            L = Tm
+            X = X_estimates[:L].clone()
+            t_meas = np.arange(L)              # 0..L-1
+            t_est  = np.arange(L)              # 0..L-1 (x_k aligned to y_k)
+            x0_state = X_estimates[0].clone() if (show_x0 and Te > 0) else None
+            if S_ref is not None:
+                S_ref = S_ref[:L]
+        # Case C: Te < Tm -> shorten measurements to Te (best-effort)
         else:
-            bm_meas_np = np.array(biomass_measurement)
+            L = Te
+            X = X_estimates[:L].clone()
+            bm_meas = bm_meas[:L]
+            t_meas = np.arange(L)
+            t_est  = np.arange(L)
+            x0_state = X_estimates[0].clone() if (show_x0 and Te > 0) else None
+            if S_ref is not None:
+                S_ref = S_ref[:L]
 
-        # extract estimated distribution + substrate
-        n_est_traj = X_estimates[:, :-1]
-        S_est_traj = X_estimates[:, -1]
+        # --- split state ---
+        n_est_traj = X[:, :-1]
+        S_est_traj = X[:, -1]
 
-        # compute biomass from estimated distribution
+        # --- biomass estimate (Σ n_i m_i Δm) ---
         if m_torch is None or delta_m_torch is None:
             raise ValueError("m_torch and delta_m_torch are required to compute biomass.")
-        biomass_est = (n_est_traj * m_torch).sum(dim=1) * delta_m_torch
-        biomass_est_np = biomass_est.detach().numpy()
-        S_est_np = S_est_traj.detach().numpy()
 
-        # substrate reference if available
-        S_ref_np = None
-        if S_reference is not None:
-            if torch.is_tensor(S_reference):
-                S_ref_np = S_reference.detach().numpy()
-            else:
-                S_ref_np = np.array(S_reference)
+        m_vec = m_torch.reshape(-1) if torch.is_tensor(m_torch) \
+                else torch.as_tensor(m_torch, dtype=torch.float32).reshape(-1)
+        delta_m = (delta_m_torch.reshape(()).to(torch.float32) if torch.is_tensor(delta_m_torch)
+                else torch.tensor(float(delta_m_torch), dtype=torch.float32))
+
+        biomass_est = (n_est_traj * m_vec).sum(dim=1) * delta_m
+        biomass_est_np = biomass_est.detach().cpu().numpy()
+        S_est_np = S_est_traj.detach().cpu().numpy()
+
+        # --- x0 markers (only for plotting; does not affect metrics/bands) ---
+        x0_biomass = None
+        x0_substrate = None
+        if show_x0 and (x0_state is not None):
+            x0_biomass = float((x0_state[:-1] * m_vec).sum() * delta_m)
+            x0_substrate = float(x0_state[-1])
+
+        # --- tolerance bands via error_metrics (use aligned sequences of length L) ---
+        biomass_tol = None
+        substrate_tol = None
+        if plot_tolerance:
+            bm_metrics = error_metrics(
+                bm_meas[:L], biomass_est,
+                rel_tol=rel_tol, abs_tol=abs_tol, window=window,
+                y_max=y_max_mass
+            )
+            biomass_tol = bm_metrics["tolerance_used (per step)"]
+
+            if S_ref is not None:
+                sub_metrics = error_metrics(
+                    S_ref, S_est_traj,
+                    rel_tol=rel_tol, abs_tol=abs_tol, window=window,
+                    y_max=y_max_substrate
+                )
+                substrate_tol = sub_metrics["tolerance_used (per step)"]
+
+        # --- numpy views for plotting ---
+        bm_meas_np = bm_meas[:L].detach().cpu().numpy()
+        S_ref_np = S_ref.detach().cpu().numpy() if S_ref is not None else None
 
         # --- Plot ---
+        import matplotlib.pyplot as plt
         fig, (ax1, ax2) = plt.subplots(2, 1, figsize=(8, 6), sharex=True)
 
         # Biomass subplot
-        ax1.plot(bm_meas_np, '-', label='Measured biomass')
-        ax1.plot(biomass_est_np, 'o', markersize=2, label=f'{title_prefix} biomass estimate')
+        if plot_tolerance and (biomass_tol is not None):
+            ax1.fill_between(
+                t_meas, bm_meas_np - biomass_tol, bm_meas_np + biomass_tol,
+                color='gray', alpha=0.3, label="Tolerance band"
+            )
+        ax1.plot(t_meas, bm_meas_np, '-', label='Measured biomass')
+        ax1.plot(t_est, biomass_est_np, 'o', markersize=2, label=f'{title_prefix} biomass est')
+
+        # x0 at t=0
+        if x0_biomass is not None and len(t_meas) > 0:
+            ax1.plot([0], [x0_biomass], marker='s', markersize=5,
+                    linestyle='None', label='x0 (estimate)')
+
         ax1.set_ylabel("Biomass")
         ax1.grid(True); ax1.legend()
 
         # Substrate subplot
         if S_ref_np is not None:
-            ax2.plot(S_ref_np, '-', label="Reference substrate")
-        ax2.plot(S_est_np, 'o', markersize=2, label=f'{title_prefix} substrate estimate')
-        
+            if plot_tolerance and (substrate_tol is not None):
+                ax2.fill_between(
+                    t_meas, S_ref_np - substrate_tol, S_ref_np + substrate_tol,
+                    color='gray', alpha=0.3, label="Tolerance band"
+                )
+            ax2.plot(t_meas, S_ref_np, '-', label="Reference substrate")
+
+        ax2.plot(t_est, S_est_np, 'o', markersize=2, label=f'{title_prefix} substrate est')
+
+        # x0 substrate at t=0
+        if x0_substrate is not None and len(t_meas) > 0:
+            ax2.plot([0], [x0_substrate], marker='s', markersize=5,
+                    linestyle='None', label='x0 (estimate)')
+
         ax2.set_xlabel("Timestep"); ax2.set_ylabel("Substrate")
         ax2.grid(True); ax2.legend()
 
         plt.tight_layout()
         plt.show()
+     
+
+        
+
+        
+
 
 
     #----------------------------------------------------evaluating error function
     def evaluate_errors(self, X_estimates, biomass_true, S_true, 
                     m_torch, delta_m_torch,
-                    rel_tol=0.05, abs_tol=1e-6, window=10):
+                    rel_tol=0.05, abs_tol=1e-6, window=10,y_max_mass=5,y_max_substrate=5):
         """
         Evaluate UKF errors for biomass + substrate against reference trajectories.
         Ignores the first state (initial guess) and the last state (no measurement).
@@ -214,9 +325,9 @@ class UKF:
 
         # compute metrics
         biomass_metrics = error_metrics(biomass_true, biomass_est,
-                                        rel_tol=rel_tol, abs_tol=abs_tol, window=window)
+                                        rel_tol=rel_tol, abs_tol=abs_tol, window=window,y_max=y_max_mass)
         substrate_metrics = error_metrics(S_true, substrate_est,
-                                        rel_tol=rel_tol, abs_tol=abs_tol, window=window)
+                                        rel_tol=rel_tol, abs_tol=abs_tol, window=window,y_max=y_max_substrate)
 
         return {
             "biomass": biomass_metrics,
@@ -225,18 +336,272 @@ class UKF:
     
 
 
+#-------------------------------------------------------START OF EKF------------------------------------------------------
 
-#-------------------------------------------------------END OF UKF--------------------------------------------------------
-def error_metrics(y_true, y_est, rel_tol=0.05, abs_tol=1e-6, window=10):
+
+
+import torch
+
+class EKF:
+    def __init__(self, state_dim, meas_dim, f_model, h_model,
+                 n_max=1.0, s_max=1.0, use_autograd=True,
+                 F_linearize_at="posterior"):
+        """
+        EKF with normalized internal state; returns physical estimates (tensor).
+
+        State: x = [n_1,...,n_M, S], state_dim = M+1 (S last).
+        Internally: x_norm = x_phys / scale, scale = [n_max (M copies), s_max].
+        f_model, h_model take normalized x; h_model returns PHYSICAL measurement.
+        Q in normalized units, R in physical units.
+
+        F_linearize_at in {"posterior","last_pred"} controls where to linearize F.
+        """
+        assert F_linearize_at in ("posterior", "last_pred")
+        self.n = state_dim
+        self.m = meas_dim
+        self.f_model = f_model
+        self.h_model = h_model
+        self.use_autograd = use_autograd
+        self.F_linearize_at = F_linearize_at
+
+        # filter state (normalized)
+        self.x = torch.zeros(self.n, dtype=torch.float32)
+        self.P = torch.eye(self.n, dtype=torch.float32)
+
+        #initial condition (not normalized)
+        self.x0_phys = None        
+
+        # covariances
+        self.Q = torch.eye(self.n, dtype=torch.float32) * 1e-3   # normalized space
+        self.R = torch.eye(self.m, dtype=torch.float32) * 1e-2   # physical space
+
+        # build scaling vector from SCALARS n_max, s_max
+        M = self.n - 1
+        n_scalar = self._as_scalar(n_max, "n_max")
+        s_scalar = self._as_scalar(s_max, "s_max")
+        n_scale = torch.full((M,), n_scalar, dtype=torch.float32)
+        s_scale = torch.tensor([s_scalar], dtype=torch.float32)
+        self.scale = torch.cat([n_scale, s_scale])  # (n,)
+
+        # store last a-priori for optional linearization policy
+        self._x_last_pred = None
+
+    # ---------- helpers ----------
+    @staticmethod
+    def _as_scalar(val, name="value"):
+        t = torch.as_tensor(val, dtype=torch.float32).reshape(-1)
+        assert t.numel() == 1, f"{name} must be a single scalar."
+        return float(t.item())
+
+    def _to_norm(self, x_phys):
+        x = torch.as_tensor(x_phys, dtype=torch.float32).reshape(-1)
+        return x / self.scale
+
+    def _to_phys(self, x_norm):
+        return x_norm * self.scale
+
+    def set_initial_state(self, x0_phys):
+        self.x0_phys= x0_phys
+        self.x = self._to_norm(x0_phys)
+        self._x_last_pred = None
+
+    # ---------- Jacobian ----------
+    def _jacobian(self, func, x_norm, eps=1e-5):
+        if self.use_autograd:
+            try:
+                x = x_norm.detach().clone().requires_grad_(True)
+                y = func(x).reshape(-1)
+                k = y.numel()
+                J = torch.zeros(k, x.numel(), dtype=torch.float32)
+                for i in range(k):
+                    (gi,) = torch.autograd.grad(y[i], x, retain_graph=True, allow_unused=True)
+                    if gi is None:
+                        gi = torch.zeros_like(x)
+                    J[i] = gi
+                return J
+            except Exception:
+                pass  # fallback to FD
+
+        # finite differences
+        x = x_norm.detach()
+        y0 = func(x).reshape(-1)
+        k = y0.numel()
+        J = torch.zeros(k, x.numel(), dtype=torch.float32)
+        for i in range(x.numel()):
+            dx = torch.zeros_like(x)
+            dx[i] = eps
+            yi = func(x + dx).reshape(-1)
+            J[:, i] = (yi - y0) / eps
+        return J
+
+    # ---------- EKF steps (normalized space) ----------
+    def predict(self, u=None):
+        # Choose linearization point for F
+        if self.F_linearize_at == "last_pred" and (self._x_last_pred is not None):
+            x_lin = self._x_last_pred
+        else:
+            x_lin = self.x  # standard: last posterior
+
+        F = self._jacobian(lambda xx: self.f_model(xx, u), x_lin)
+
+        # Propagate mean & covariance
+        x_pred = self.f_model(self.x, u).reshape(-1)
+        PHt = self.P @ F.T
+        P_pred = F @ PHt + self.Q
+
+        self.x = x_pred
+        self.P = P_pred
+        self._x_last_pred = x_pred.detach()
+
+    def update(self, y_phys):
+        # Predict measurement (PHYSICAL units) at a-priori state
+        y_pred = self.h_model(self.x).reshape(-1)
+        H = self._jacobian(self.h_model, self.x)
+
+        y = torch.as_tensor(y_phys, dtype=torch.float32).reshape(-1)
+        innov = y - y_pred
+
+        S = H @ self.P @ H.T + self.R
+        PHt = self.P @ H.T
+        # Solve S K^T = (P H^T)^T  => K = (S \ PHt^T)^T (more stable than explicit inverse)
+        K = torch.linalg.solve(S, PHt.T).T
+
+        self.x = self.x + K @ innov
+        I = torch.eye(self.n, dtype=torch.float32)
+        self.P = (I - K @ H) @ self.P
+
+    def run(self, U_seq, Y_seq):
+        """
+        U_seq: (T, ?) or None
+        Y_seq: (T, meas_dim) in PHYSICAL units (torch tensor or array-like)
+        Returns:
+            X_phys: (T, state_dim) torch.Tensor in PHYSICAL units
+        """
+        T = Y_seq.shape[0]
+        X_phys = torch.zeros(T + 1, self.n, dtype=torch.float32)
+        X_phys[0] = self.x0_phys.clone()
+        for t in range(T):
+            u_t = None if U_seq is None else U_seq[t]
+            self.predict(u_t)
+            self.update(Y_seq[t])
+            X_phys[t+1] = self._to_phys(self.x)
+        return X_phys.detach()
+
+    def plot_results(self, X_estimates, biomass_measurement,
+                    S_reference=None, m_torch=None, delta_m_torch=None,
+                    title_prefix="EKF"):
+        import numpy as np
+        import matplotlib.pyplot as plt
+        import torch
+
+        if torch.is_tensor(biomass_measurement):
+            bm_meas_np = biomass_measurement.detach().cpu().numpy()
+        else:
+            bm_meas_np = np.array(biomass_measurement)
+
+        # Ensure torch tensor for state trajectory (PHYSICAL units)
+        if not torch.is_tensor(X_estimates):
+            X_estimates = torch.as_tensor(X_estimates, dtype=torch.float32)
+
+        n_est_traj = X_estimates[:, :-1]   # (T, M)
+        S_est_traj = X_estimates[:, -1]    # (T,)
+
+        if m_torch is None or delta_m_torch is None:
+            raise ValueError("m_torch and delta_m_torch are required to compute biomass.")
+
+        # ---- Coerce inputs permissively ----
+        # m_torch: length-M vector (torch or array-like)
+        if not torch.is_tensor(m_torch):
+            m_vec = torch.as_tensor(m_torch, dtype=torch.float32).reshape(-1)
+        else:
+            m_vec = m_torch.reshape(-1)
+
+        M = n_est_traj.shape[1]
+        assert m_vec.numel() == M, f"m_torch must have length {M}."
+
+        # delta_m_torch: allow python float / numpy scalar / torch scalar
+        if torch.is_tensor(delta_m_torch):
+            delta_m = delta_m_torch.reshape(()).to(torch.float32)
+        else:
+            delta_m = torch.tensor(float(delta_m_torch), dtype=torch.float32)
+
+        # ---- Biomass estimate: sum_i n_i * m_i * Δm ----
+        biomass_est = (n_est_traj * m_vec).sum(dim=1) * delta_m  # (T,)
+        biomass_est_np = biomass_est.detach().numpy()
+        S_est_np = S_est_traj.detach().numpy()
+
+        # Substrate reference (optional)
+        S_ref_np = None
+        if S_reference is not None:
+            if torch.is_tensor(S_reference):
+                S_ref_np = S_reference.detach().numpy()
+            else:
+                S_ref_np = np.array(S_reference)
+
+        # ---- Plot ----
+        fig, (ax1, ax2) = plt.subplots(2, 1, figsize=(8, 6), sharex=True)
+
+        ax1.plot(bm_meas_np, '-', label='Measured biomass')
+        ax1.plot(biomass_est_np, 'o', markersize=2, label=f'{title_prefix} biomass estimate')
+        ax1.set_ylabel("Biomass")
+        ax1.grid(True); ax1.legend()
+
+        if S_ref_np is not None:
+            ax2.plot(S_ref_np, '-', label="Reference substrate")
+        ax2.plot(S_est_np, 'o', markersize=2, label=f'{title_prefix} substrate estimate')
+
+        ax2.set_xlabel("Timestep"); ax2.set_ylabel("Substrate")
+        ax2.grid(True); ax2.legend()
+
+        plt.tight_layout()
+        plt.show()
+        return fig, (ax1, ax2)
+
+
+#The extended Kalman filter is another approach for a black box observer-->class of EKF, error metrics below should be able to be used, as well as the same f_functions and h_functions...
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+def error_metrics(y_true, y_est, rel_tol=0.05, abs_tol=1e-6, window=10, y_max=5):
     """
-    Compute error metrics between true and estimated trajectories.
-    
+    Compute error metrics between true and estimated trajectories,
+    with a dynamic tolerance band that shrinks with smaller y_true.
+
     Args:
         y_true: (T,) ground truth trajectory
         y_est:  (T,) estimated trajectory
-        rel_tol: relative tolerance (fraction of mean(|y_true|))
+        rel_tol: relative tolerance fraction
         abs_tol: absolute tolerance floor
         window: consecutive steps required for settling
+        y_max: reference max value (scalar). If None, falls back to max(y_true).
 
     Returns:
         dict with RMSE, MAE, relative norms, time_in_tol, settling_time
@@ -246,21 +611,30 @@ def error_metrics(y_true, y_est, rel_tol=0.05, abs_tol=1e-6, window=10):
     e = y_est - y_true
     T = len(y_true)
 
-    # dynamic tolerance
-    tol_val = max(abs_tol, rel_tol * y_true.abs().mean().item())
+    # use external y_max if given, else fallback
+    if y_max is None:
+        y_max_val = y_true.abs().max().item()
+    else:
+        y_max_val = float(y_max)
+
+    # --- dynamic tolerance per timestep ---
+    tol_vec = torch.maximum(
+        torch.full_like(y_true, abs_tol),
+        rel_tol * y_max_val * y_true.abs()
+    )
 
     rmse = torch.sqrt((e**2).mean()).item()
     mae  = e.abs().mean().item()
     max_err = e.abs().max().item()
     rel_l2 = torch.norm(e, p=2).item() / (torch.norm(y_true, p=2).item() + 1e-12)
 
-    # percentage of time within tol
-    time_in_tol = (e.abs() < tol_val).float().mean().item()
+    # percentage of time within tolerance band
+    time_in_tol = (e.abs() < tol_vec).float().mean().item()
 
     # settling time (first index where error stays < tol for 'window' steps)
     settling_time = T
     for t in range(T - window):
-        if (e[t:t+window].abs() < tol_val).all():
+        if (e[t:t+window].abs() < tol_vec[t:t+window]).all():
             settling_time = t
             break
 
@@ -271,8 +645,10 @@ def error_metrics(y_true, y_est, rel_tol=0.05, abs_tol=1e-6, window=10):
         "Rel_L2": rel_l2,
         "time_in_tol (%)": time_in_tol,
         "settling_time(Timesteps)": settling_time,
-        "tolerance_used": tol_val,
+        "tolerance_used (per step)": tol_vec.detach().numpy(),
+        "y_max_ref": y_max_val,
     }
+
 
 def rollout(model, n_norm0, s_norm0, steps):
     """
@@ -289,14 +665,14 @@ def rollout(model, n_norm0, s_norm0, steps):
     S = torch.empty((steps+1,))
     N[:,0] = n; S[0] = s
 
-    with torch.no_grad():
-        for t in range(steps):
-            x_norm = torch.cat([N[:,t], S[t].unsqueeze(0)], dim=0)  # already normalized
-            y_norm = model(x_norm.unsqueeze(0)).squeeze(0)          # (M+1,)
-            n_next = y_norm[:M]
-            s_next = y_norm[M]
-            N[:,t+1] = n_next
-            S[t+1] = s_next
+    
+    for t in range(steps):
+        x_norm = torch.cat([N[:,t], S[t].unsqueeze(0)], dim=0)  # already normalized
+        y_norm = model(x_norm.unsqueeze(0)).squeeze(0)          # (M+1,)
+        n_next = y_norm[:M]
+        s_next = y_norm[M]
+        N[:,t+1] = n_next
+        S[t+1] = s_next
     return N, S
 
 

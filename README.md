@@ -91,7 +91,6 @@ implementing the PDE equations with the correct constraints.
 This weeks work will take place in the folder [Training_data_integro_diff_batch](https://github.com/therealtoby1/Master/tree/main/Training_data_integro_diff_batch)
 The Notebook files will contain the models and the training steps. The results will be stored in this very folder. The file [All_Models.py](https://github.com/therealtoby1/Master/blob/main/Training_data_integro_diff_batch/All_Models.py) stores the classes for the Neural Networks, GPs etc., so that i can later use them in the [Cell_growth_integro_diff_batch.ipynb](https://github.com/therealtoby1/Master/blob/main/Cell_growth_integro_diff_Batch.ipynb)
 
-
 - Training a Neural network for the input-free system (batch) on data from the PDE.
 - attempting DMD for the Datasets --also EDMD and reading into literature
 - Maybe finding a way to implement GP even though data size is large
@@ -101,8 +100,9 @@ The Notebook files will contain the models and the training steps. The results w
 
 *25/08 - 29/08*
 
-This week i will make an attempt to use the first observer on the batch models of the integro differential equation. 
+This week i will make an attempt to use the first observer on the batch models of the integro differential equation.
+
 - Implementing the UKF for all models that have a relatively good fit
 - Implementing the EKF for all models that have a relatively good fit
+- creating an error band for the system to estimate when a trajectory counts as "converged" and see how good the models work in the different filters. compare across all validation Datasets!
 - Moving Horizon estimation for all those models
-

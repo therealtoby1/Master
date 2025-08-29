@@ -507,10 +507,11 @@ class PopulationPDE(nn.Module):
         return torch.cat([dn_hat_dt, dS_hat_dt.view(1)])
 
 class PDEWrapper(nn.Module):
-    def __init__(self, pde_model, delta_t):
+    def __init__(self, pde_model, delta_t,method="dopri5"):
         super().__init__()
         self.pde_model = pde_model
         self.delta_t = delta_t
+        self.method = method
 
     def forward(self, x, u=None):
         """
@@ -526,7 +527,7 @@ class PDEWrapper(nn.Module):
             return self.pde_model.forward(t_, x_) - (u if u is not None else 0.0) * torch.cat([x_[:-1], x_[-1:].view(1)])
 
         # integrate one step
-        sol = odeint(rhs, x, t, method="dopri5")
+        sol = odeint(rhs, x, t, method=self.method)
         x_next = sol[-1]
         return x_next
 
